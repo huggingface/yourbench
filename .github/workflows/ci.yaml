@@ -17,9 +17,9 @@ jobs:
         python-version: [3.12]
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c  # v4
       with:
         python-version: ${{ matrix.python-version }}
     
@@ -41,7 +41,7 @@ jobs:
         python -m pytest tests/ --cov=yourbench --cov-report=xml
     
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@ab904c41d6ece82784817410c45d8b8c02684457  # v3
       with:
         file: ./coverage.xml
         fail_ci_if_error: false
