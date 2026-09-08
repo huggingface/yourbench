@@ -15,6 +15,7 @@ class ChunkSamplingConfig:
     mode: str = CHUNK_MODE_ALL
     value: float = 1.0
     random_seed: int = 42
+    strategy: str = "random"
 
 
 def split_into_token_chunks(
@@ -37,6 +38,8 @@ def split_into_token_chunks(
     Returns:
         list[str]: List of decoded text chunks.
     """
+    if chunk_tokens <= 0 or not 0 <= overlap < chunk_tokens:
+        raise ValueError("Require chunk_tokens > 0 and 0 <= overlap < chunk_tokens")
     if preprocess:
         text = preprocess(text)
 
@@ -51,15 +54,16 @@ def get_sampling_cfg(cfg: Any) -> ChunkSamplingConfig:
     cs = cfg.chunk_sampling
     # Map schema fields to local ChunkSamplingConfig
     return ChunkSamplingConfig(
-        mode=CHUNK_MODE_ALL,
-        value=1.0,
+        mode=CHUNK_MODE_COUNT if cs.enable else CHUNK_MODE_ALL,
+        value=cs.num_samples if cs.enable else 1.0,
+        strategy=getattr(cs, "strategy", "random"),
         random_seed=cs.random_seed if hasattr(cs, "random_seed") else 42,
     )
 
 
-def safe_sample(lst: list[Any], k: int) -> list[Any]:
+def safe_sample(lst: list[Any], k: int, rng: random.Random | None = None) -> list[Any]:
     """Sample k elements from lst, or return lst if k >= len(lst)"""
-    return random.sample(lst, k) if k < len(lst) else lst
+    return (rng or random.Random()).sample(lst, k) if k < len(lst) else lst
 
 
 def sample_single_hop_chunks(
@@ -68,17 +72,17 @@ def sample_single_hop_chunks(
     if not chunks_list:
         return []
 
-    random.seed(chunk_sampling.random_seed)
+    rng = random.Random(chunk_sampling.random_seed)
     mode = chunk_sampling.mode.lower()
     value = chunk_sampling.value
     total = len(chunks_list)
 
     if mode == CHUNK_MODE_PERCENT:
         k = int(total * value)
-        return safe_sample(chunks_list, k)
+        return chunks_list[:k] if chunk_sampling.strategy == "first" else safe_sample(chunks_list, k, rng)
     elif mode == CHUNK_MODE_COUNT:
         k = min(int(value), total)
-        return safe_sample(chunks_list, k)
+        return chunks_list[:k] if chunk_sampling.strategy == "first" else safe_sample(chunks_list, k, rng)
     else:
         return chunks_list
 
@@ -90,14 +94,14 @@ def sample_multihop_groups(
         return mh_chunks
     mode = chunk_sampling_cfg.get("mode", CHUNK_MODE_ALL).lower()
     value = chunk_sampling_cfg.get("value", 1.0)
-    random.seed(chunk_sampling_cfg.get("random_seed", 42))
+    rng = random.Random(chunk_sampling_cfg.get("random_seed", 42))
     total = len(mh_chunks)
     if total < 2:
         return mh_chunks
     if mode == CHUNK_MODE_PERCENT:
         k = int(total * value)
-        return safe_sample(mh_chunks, k)
+        return safe_sample(mh_chunks, k, rng)
     elif mode == CHUNK_MODE_COUNT:
         k = min(int(value), total)
-        return safe_sample(mh_chunks, k)
+        return safe_sample(mh_chunks, k, rng)
     return mh_chunks

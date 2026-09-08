@@ -1,7 +1,6 @@
 """Document chunking pipeline stage."""
 
 import hashlib
-from functools import cache
 
 import numpy as np
 from loguru import logger
@@ -12,19 +11,20 @@ from yourbench.utils.dataset_engine import custom_load_dataset, custom_save_data
 from yourbench.utils.logging_context import log_step, log_stage
 
 
-@cache
 def _get_rng(seed: str) -> np.random.Generator:
     """Get deterministic RNG from string seed."""
     seed_int = int(hashlib.md5(seed.encode()).hexdigest()[:8], 16)
     return np.random.default_rng(seed_int)
 
 
-def _chunk_text(text: str, doc_id: str, max_tokens: int) -> list[dict]:
+def _chunk_text(
+    text: str, doc_id: str, max_tokens: int, overlap: int = 0, encoding_name: str = "cl100k_base"
+) -> list[dict]:
     """Split text into token-based chunks."""
     if not text.strip():
         return []
 
-    chunks = split_into_token_chunks(text, max_tokens, overlap=0)
+    chunks = split_into_token_chunks(text, max_tokens, overlap=overlap, encoding_name=encoding_name)
     return [{"chunk_id": f"{doc_id}_{i}", "chunk_text": chunk} for i, chunk in enumerate(chunks)]
 
 
@@ -77,10 +77,10 @@ def _sample_multihop_combinations(n_chunks: int, h_min: int, h_max: int, factor:
 def _process_document(row: dict, cfg) -> tuple[list[dict], list[dict]]:
     """Process a single document into chunks and multihop combinations."""
     doc_text = row.get("document_text", "")
-    doc_id = row.get("document_id", f"doc_{hash(doc_text) % 10000}")
+    doc_id = row.get("document_id", f"doc_{hashlib.sha256(doc_text.encode()).hexdigest()[:16]}")
 
     # Create single-hop chunks
-    chunks = _chunk_text(doc_text, doc_id, cfg.l_max_tokens)
+    chunks = _chunk_text(doc_text, doc_id, cfg.l_max_tokens, cfg.token_overlap, cfg.encoding_name)
     if not chunks:
         return [], []
 
@@ -104,7 +104,7 @@ def run(config) -> None:
 
         # Load dataset
         with log_step("loading_dataset"):
-            dataset = custom_load_dataset(config=config, subset="summarized")
+            dataset = custom_load_dataset(config=config, subset=getattr(cfg, "input_subset", "summarized"))
             logger.info(f"Processing {len(dataset)} documents")
 
         # Process all documents

@@ -39,25 +39,29 @@ def load_prompt_from_package(package_path: str) -> str | None:
     return None
 
 
-def load_prompt(value: str, default_package_path: str = "") -> str:
-    """Load prompt from value, file, or package default."""
+def load_prompt(value: str, default_package_path: str = "", *, base_dir: Path | None = None) -> str:
+    """Load inline text or a prompt file. Missing explicit files are errors."""
     if not value:
-        if default_package_path:
-            return load_prompt_from_package(default_package_path) or ""
-        return ""
-
-    if "\n" in value or len(value) > 300:
-        return value
-
-    path = Path(value)
-    if path.suffix.lower() in {".md", ".txt", ".prompt"}:
-        if path.exists():
-            try:
-                return path.read_text(encoding="utf-8").strip()
-            except Exception as exc:
-                logger.warning(f"Failed to read prompt file {path}: {exc}")
-        if content := load_prompt_from_package(value):
-            return content
-        logger.warning(f"Prompt file not found: {path}")
-
+        if not default_package_path:
+            return ""
+        content = load_prompt_from_package(default_package_path)
+        if content is None:
+            raise FileNotFoundError(f"Default prompt not found: {default_package_path}")
+        return content
+    if value.startswith("inline:"):
+        return value[len("inline:") :]
+    explicit_file = value.startswith("file:")
+    candidate = value[len("file:") :] if explicit_file else value
+    if not explicit_file and ("\n" in candidate or len(candidate) > 300):
+        return candidate
+    path = Path(candidate).expanduser()
+    if explicit_file or path.suffix.lower() in {".md", ".txt", ".prompt"}:
+        resolved = (base_dir or Path.cwd()) / path
+        if resolved.is_file():
+            return resolved.read_text(encoding="utf-8").strip()
+        if not explicit_file:
+            content = load_prompt_from_package(candidate)
+            if content is not None:
+                return content
+        raise FileNotFoundError(f"Prompt file not found: {resolved}")
     return value

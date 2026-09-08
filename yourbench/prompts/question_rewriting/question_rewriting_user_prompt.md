@@ -1,28 +1,12 @@
-Please rewrite the following question while preserving its exact meaning and answerability.
+Original question: {original_question}
+Answer: {answer}
+Choices: {choices}
 
-<original_question>
-{original_question}
-</original_question>
-
-<answer>
-{answer}
-</answer>
-
-<source_chunks>
+Source passages with document and chunk identifiers:
 {chunk_text}
-</source_chunks>
 
-<document_summary>
+Document summaries:
 {document_summary}
-</document_summary>
 
-<additional_instructions>
+Additional rewriting instructions:
 {additional_instructions}
-</additional_instructions>
-
-Remember to:
-1. Keep the exact same meaning and information requirements
-2. Ensure the rewritten question can be answered with the same source material
-3. Make the question sound more natural and engaging
-4. Provide your rewritten question in <rewritten_question> tags
-5. Explain your question_rewriting approach in <question_rewriting_rationale> tags 

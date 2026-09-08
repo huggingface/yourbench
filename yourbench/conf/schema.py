@@ -21,7 +21,7 @@ class HFConfig(BaseModel):
 
     hf_dataset_name: str = ""
     hf_organization: str = ""
-    hf_token: str = ""
+    hf_token: str = Field(default="", repr=False)
     private: bool = False
     concat_if_exist: bool = False
     local_dataset_dir: str = "data/saved_dataset"
@@ -39,7 +39,7 @@ class ModelConfig(BaseModel):
 
     model_name: str = ""
     base_url: str | None = None
-    api_key: str | None = None
+    api_key: str | None = Field(default=None, repr=False)
     max_concurrent_requests: int = 128
     encoding_name: str = "cl100k_base"
     provider: str | None = None
@@ -69,6 +69,8 @@ class ChunkSamplingConfig(BaseModel):
     def validate_samples(self) -> "ChunkSamplingConfig":
         if self.num_samples < 1:
             raise ConfigValidationError(f"num_samples must be >= 1, got {self.num_samples}")
+        if self.strategy not in {"random", "first"}:
+            raise ConfigValidationError("strategy must be random or first")
         return self
 
 
@@ -78,7 +80,6 @@ class IngestionConfig(BaseModel):
     run: bool = False
     source_documents_dir: str = "data/raw"
     output_dir: str = "data/processed"
-    upload_to_hub: bool = True
     llm_ingestion: bool = False
     pdf_dpi: int = 300
     pdf_llm_prompt: str = ""
@@ -115,6 +116,8 @@ class SummarizationConfig(BaseModel):
 class ChunkingConfig(BaseModel):
     """Chunking stage configuration."""
 
+    input_subset: str = "summarized"
+
     run: bool = False
     l_max_tokens: int = 8192
     token_overlap: int = 512
@@ -131,6 +134,8 @@ class ChunkingConfig(BaseModel):
             raise ConfigValidationError(f"l_max_tokens must be > 0, got {self.l_max_tokens}")
         if self.token_overlap < 0:
             raise ConfigValidationError(f"token_overlap must be >= 0, got {self.token_overlap}")
+        if self.token_overlap >= self.l_max_tokens:
+            raise ConfigValidationError("token_overlap must be < l_max_tokens")
         if self.h_min < 1:
             raise ConfigValidationError(f"h_min must be >= 1, got {self.h_min}")
         if self.h_max < self.h_min:
@@ -162,6 +167,7 @@ class SingleShotConfig(BaseModel):
             raise ConfigValidationError(
                 f"question_mode must be 'open-ended' or 'multi-choice', got '{self.question_mode}'"
             )
+        self.question_mode = mode or "open-ended"
         return self
 
 
@@ -186,6 +192,7 @@ class MultiHopConfig(BaseModel):
             raise ConfigValidationError(
                 f"question_mode must be 'open-ended' or 'multi-choice', got '{self.question_mode}'"
             )
+        self.question_mode = mode or "open-ended"
         return self
 
 
@@ -215,6 +222,7 @@ class CrossDocConfig(BaseModel):
             raise ConfigValidationError(
                 f"question_mode must be 'open-ended' or 'multi-choice', got '{self.question_mode}'"
             )
+        self.question_mode = mode or "open-ended"
         if self.max_combinations < 1:
             raise ConfigValidationError(f"max_combinations must be >= 1, got {self.max_combinations}")
         if self.chunks_per_document < 1:
@@ -301,3 +309,16 @@ class YourbenchConfig(BaseModel):
     debug: bool = False
 
     model_config = {"extra": "forbid"}
+
+    @model_validator(mode="after")
+    def validate_model_roles(self) -> "YourbenchConfig":
+        names = [model.model_name for model in self.model_list]
+        if any(not name.strip() for name in names):
+            raise ConfigValidationError("model_name must not be empty")
+        if len(names) != len(set(names)):
+            raise ConfigValidationError("model names must be unique; duplicate model_name")
+        for stage, assigned in self.model_roles.items():
+            unknown = set(assigned) - set(names)
+            if unknown:
+                raise ConfigValidationError(f"Unknown models assigned to {stage}: {sorted(unknown)}")
+        return self

@@ -1,51 +1,25 @@
-# YourBench Examples
+# Runnable examples
 
-Pre-configured examples demonstrating different YourBench features.
+These recipes use the small fictional policy corpus in [sample_documents](sample_documents/) and save datasets and JSONL under each example's `output/` directory. They do not publish to the Hub. Source and output paths resolve relative to each configuration file.
 
-## Quick Start
+Install the checkout with `pip install -e .`. Set `YOURBENCH_MODEL`, `YOURBENCH_BASE_URL` and `YOURBENCH_API_KEY` for an endpoint you can access, then run:
 
 ```bash
-# Simplest example - works with just a HuggingFace token
+yourbench validate example/default_example/config.yaml
 yourbench run example/default_example/config.yaml
 ```
 
-## Examples Overview
+`validate` does not generate questions. Running calls your model and may incur charges. Model availability and output counts depend on your endpoint and responses.
 
-| Example | Key Feature | Model Provider | Data Included |
-|---------|-------------|----------------|---------------|
-| [`default_example`](default_example/) | **Quickstart** - Minimal config | HuggingFace (free) | ✅ PDF |
-| [`harry_potter_quizz`](harry_potter_quizz/) | **Tutorial** - Comprehensive walkthrough | OpenRouter | ✅ PDF |
-| [`custom_prompts_demo`](custom_prompts_demo/) | **Custom Prompts** - Domain-specific questions | OpenRouter | ✅ PDFs |
-| [`local_vllm_private_data`](local_vllm_private_data/) | **Self-Hosted** - Local vLLM models | Local vLLM | ✅ HTMLs |
-| [`rich_pdf_extraction_with_gemini`](rich_pdf_extraction_with_gemini/) | **LLM Ingestion** - Charts/figures extraction | OpenRouter/Gemini | ✅ PDF |
-| [`custom_schema_demo`](custom_schema_demo/) | **Custom Schemas** - Pydantic output control | Any OpenAI-compatible | ✅ PDF |
+| Example | Purpose |
+| --- | --- |
+| [default_example](default_example/) | Minimal document-to-question pipeline |
+| [harry_potter_quizz](harry_potter_quizz/) | Multiple-choice format; uses the policy corpus unless replaced |
+| [custom_prompts_demo](custom_prompts_demo/) | Custom generation instructions |
+| [local_vllm_private_data](local_vllm_private_data/) | Local compatible endpoint without a required API key |
+| [rich_pdf_extraction_with_gemini](rich_pdf_extraction_with_gemini/) | PDF page-image ingestion with a vision-capable model |
+| [custom_schema_demo](custom_schema_demo/) | Custom Pydantic fields and constraints |
 
-## Shared Resources
+Directory names from older tutorials are retained, but no example requires a particular commercial model. For your own data, replace `source_documents_dir`; for publication, explicitly configure Hub saving. The PDF demo uses [sample_pdf](sample_pdf/) instead of the Markdown corpus.
 
-| Resource | Description |
-|----------|-------------|
-| [`prompts/`](prompts/) | Reusable prompt templates for different domains |
-
-## Which Example Should I Use?
-
-- **Just getting started?** → `default_example`
-- **Want a detailed tutorial?** → `harry_potter_quizz`
-- **Need custom question styles?** → `custom_prompts_demo`
-- **Running your own models?** → `local_vllm_private_data`
-- **Need structured output fields?** → `custom_schema_demo`
-- **Have complex PDFs with charts?** → `rich_pdf_extraction_with_gemini`
-
-## Environment Variables
-
-Most examples need API keys. Create a `.env` file:
-
-```bash
-# For HuggingFace models (default_example)
-HF_TOKEN=hf_xxxxx
-
-# For OpenRouter examples
-OPENROUTER_API_KEY=sk-xxxxx
-
-# For OpenAI
-OPENAI_API_KEY=sk-xxxxx
-```
+See [CLI usage](../docs/CLI.md), [model endpoints](../docs/USING_OPENAI_COMPATIBLE_MODELS.md), and [shared prompts](prompts/).
