@@ -140,7 +140,9 @@ def _generate_and_upload_dataset_card(config: Any, template_path: str | None = N
     Raises exceptions on failure - caller should handle.
     """
     settings = _extract_settings_impl(config)
-    dataset_repo_name = settings.repo_id
+    from yourbench.utils.dataset_engine import _remote_repo
+
+    dataset_repo_name = _remote_repo(settings)
     token = settings.token
 
     logger.info(f"Uploading card for dataset: {dataset_repo_name}")

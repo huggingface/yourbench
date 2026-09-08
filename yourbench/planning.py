@@ -11,6 +11,7 @@ import yaml
 from pydantic import Field, BaseModel, ValidationError, field_validator
 
 from yourbench.conf.schema import ModelConfig, YourbenchConfig
+from yourbench.utils.parsing_engine import decode_response_json
 from yourbench.utils.inference.inference_core import InferenceCall, run_inference
 
 
@@ -68,11 +69,9 @@ def interpret_brief(brief: str, model: ModelConfig, source_count: int) -> Benchm
     outputs = responses.get(model.model_name, [])
     if len(outputs) != 1 or not outputs[0].strip():
         raise ValueError("Planner returned no usable response")
-    response = outputs[0].strip()
-    if response.startswith("```") and response.endswith("```"):
-        response = response.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    payload = decode_response_json(outputs[0])
     try:
-        return BenchmarkIntent.model_validate_json(response)
+        return BenchmarkIntent.model_validate(payload)
     except ValidationError:
         raise ValueError("Planner returned an invalid benchmark intent") from None
 
@@ -141,7 +140,6 @@ def create_recipe(
             "run": True,
             "source_documents_dir": str(source),
             "output_dir": str(output / "processed"),
-            "upload_to_hub": False,
         },
         "summarization": {"run": True},
         "chunking": {"run": True},

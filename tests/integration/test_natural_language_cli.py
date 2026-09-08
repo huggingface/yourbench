@@ -7,13 +7,14 @@ import threading
 import subprocess
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
+import yaml
 import pytest
 
 
 @pytest.fixture
 def model_server():
     calls = []
-    state = {"fail_generation": False}
+    state = {"fail_generation": False, "custom_fields": {}}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -33,7 +34,12 @@ def model_server():
                     "unsupported_requests": [],
                 })
             elif not system:
-                content = "<chunk_summary>Returns are allowed within thirty days.</chunk_summary>"
+                content = json.dumps({"summary": "Returns are allowed within thirty days."})
+            elif system.startswith("Rewrite the question"):
+                content = json.dumps({
+                    "question": "Within how many days can a customer return an item?",
+                    "rationale": "Clarified the customer action without changing the time limit.",
+                })
             elif state["fail_generation"]:
                 content = "Invalid question output"
             else:
@@ -46,6 +52,7 @@ def model_server():
                         "thought_process": "Tests the policy time limit.",
                         "estimated_difficulty": 3,
                         "citations": ["Returns are allowed within thirty days."],
+                        **state["custom_fields"],
                     }
                 ])
             payload = json.dumps({
@@ -159,3 +166,93 @@ def test_create_executes_without_plan_only(tmp_path, model_server):
     assert result.returncode == 0, result.stdout + result.stderr
     assert len(calls) == 3
     assert (output / "jsonl" / "prepared_lighteval.jsonl").is_file()
+
+
+def test_saved_recipe_rewrites_and_exports_custom_payload_with_provenance(tmp_path, model_server):
+    endpoint, calls, state = model_server
+    source = tmp_path / "source"
+    source.mkdir()
+    source_text = "Returns are allowed within thirty days."
+    (source / "policy.txt").write_text(source_text)
+    output = tmp_path / "benchmark"
+    planned = invoke(
+        tmp_path,
+        [
+            "create",
+            "Test returns policy comprehension",
+            "--source",
+            str(source),
+            "--output",
+            str(output),
+            "--model",
+            "local-test",
+            "--base-url",
+            endpoint,
+            "--api-key-env",
+            "YOURBENCH_TEST_KEY",
+            "--plan-only",
+        ],
+    )
+    assert planned.returncode == 0, planned.stdout + planned.stderr
+    schema = output / "question_schema.py"
+    schema.write_text(
+        "from pydantic import BaseModel, Field\n"
+        "class RubricItem(BaseModel):\n    criterion: str\n    weight: int = Field(ge=1)\n"
+        "class DataFormat(BaseModel):\n"
+        "    question: str\n    answer: str\n    citations: list[str]\n"
+        "    rubric: list[RubricItem]\n    difficulty: str\n"
+    )
+    custom_fields = {
+        "rubric": [{"criterion": "States the thirty-day limit", "weight": 2}],
+        "difficulty": "Requires reading the policy, not a numeric difficulty score",
+    }
+    state["custom_fields"] = custom_fields
+    config_path = output / "config.yaml"
+    recipe = yaml.safe_load(config_path.read_text())
+    recipe["pipeline"]["single_hop_question_generation"]["question_schema"] = "question_schema.py"
+    recipe["pipeline"]["question_rewriting"] = {"run": True}
+    config_path.write_text(yaml.safe_dump(recipe, sort_keys=False))
+    result = invoke(tmp_path, ["run", str(config_path), "--quiet"])
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    def saved_rows(subset):
+        return [json.loads(line) for line in (output / "jsonl" / f"{subset}.jsonl").read_text().splitlines()]
+
+    generated = saved_rows("single_hop_questions")
+    rewritten = saved_rows("single_hop_questions_rewritten")
+    exported = saved_rows("prepared_lighteval")
+    assert len(generated) == len(rewritten) == len(exported) == 1
+    before, after, final = generated[0], rewritten[0], exported[0]
+    assert before["question"] == "How long is the returns window?"
+    assert after["question"] == final["question"] == "Within how many days can a customer return an item?"
+    assert final["original_question"] == before["question"]
+    for field in [
+        "answer",
+        "self_answer",
+        "sources",
+        "document_id",
+        "chunk_id",
+        "question_data",
+        "citations",
+        *custom_fields,
+    ]:
+        assert after[field] == final[field] == before[field]
+    assert final["ground_truth_answer"] == "Thirty days."
+    assert final["choices"] == ["Thirty days."]
+    assert final["gold"] == [0]
+    assert final["chunks"] == [source_text]
+    assert final["question_rewriting_model"] == "local-test"
+    assert final["question_rewriting_rationale"]
+    assert final["question_data"]["question"] == before["question"]
+    assert "estimated_difficulty" not in final
+    assert {field: final[field] for field in custom_fields} == custom_fields
+
+    rewriting_calls = [call for call in calls if call["messages"][0]["content"].startswith("Rewrite the question")]
+    assert len(rewriting_calls) == 1
+    prompt = rewriting_calls[0]["messages"][1]["content"]
+    assert before["question"] in prompt and before["answer"] in prompt
+    assert source_text in prompt
+    assert before["sources"][0]["document_id"] in prompt
+    assert before["sources"][0]["chunk_id"] in prompt
+    assert json.loads((output / "run.json").read_text())["status"] == "completed"
+    assert "local-test-secret" not in config_path.read_text() + result.stdout + result.stderr

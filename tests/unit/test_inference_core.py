@@ -160,19 +160,7 @@ def test_external_cancellation_closes_client(monkeypatch):
 
 def test_actual_aggregate_statistics(monkeypatch):
     monkeypatch.setattr(
-        tracking,
-        "_cost_data",
-        __import__("collections").defaultdict(
-            lambda: {
-                "calls": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "successes": 0,
-                "duration": 0.0,
-                "retries": 0,
-                "queue_time": 0.0,
-            }
-        ),
+        tracking, "_cost_data", __import__("collections").defaultdict(__import__("collections").Counter)
     )
     tracking.update_aggregate_metrics("test", 10, 20, duration=4, success=True, retry_count=2)
     tracking.update_aggregate_metrics("test", 10, 0, duration=2, success=False)
@@ -227,3 +215,143 @@ def test_batch_preserves_order_despite_completion_order(monkeypatch):
         assert result == {"test": ["first", "second"]}
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("limits", [(1, 2), (2, 3), (3, 1)])
+def test_per_model_concurrency_is_saturated_and_bounded(monkeypatch, limits):
+    """Hold real coroutines in-flight: both models must saturate but never exceed their caps."""
+
+    async def scenario():
+        release = asyncio.Event()
+        saturated = asyncio.Event()
+        active = {"alpha": 0, "beta": 0}
+        peak = dict(active)
+        caps = dict(zip(active, limits))
+        clients = {}
+
+        async def request(**kwargs):
+            model = kwargs["model"]
+            active[model] += 1
+            peak[model] = max(peak[model], active[model])
+            if all(active[name] >= cap for name, cap in caps.items()):
+                saturated.set()
+            try:
+                await release.wait()
+                # Yield once more so subsequent work genuinely overlaps.
+                await asyncio.sleep(0)
+                return _DummyResponse(f"{model}:{kwargs['messages'][0]['content']}")
+            finally:
+                active[model] -= 1
+
+        def make_client(model):
+            clients[model.model_name] = _client(request)
+            return clients[model.model_name]
+
+        monkeypatch.setattr(core, "_new_client", make_client)
+        monkeypatch.setattr(core, "log_inference_metrics", lambda metrics: None)
+        models = [Model(name, max_concurrent_requests=cap) for name, cap in caps.items()]
+        calls = [InferenceCall(messages=[{"role": "user", "content": str(i)}]) for i in range(7)]
+        batch = asyncio.create_task(core._run_inference_async_helper(models, calls))
+        try:
+            await asyncio.wait_for(saturated.wait(), timeout=2)
+            # All runnable tasks get a turn, exposing a missing/oversized semaphore.
+            await asyncio.sleep(0)
+            assert active == caps
+            release.set()
+            result = await asyncio.wait_for(batch, timeout=2)
+            assert result == {name: [f"{name}:{i}" for i in range(7)] for name in caps}
+            assert peak == caps
+            assert active == {"alpha": 0, "beta": 0}
+            for client in clients.values():
+                client.close.assert_awaited_once()
+        finally:
+            batch.cancel()
+            await asyncio.gather(batch, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("status,expected_attempts", [(400, 1), (401, 1), (429, 3), (503, 3)])
+def test_http_failures_apply_policy_through_execution(monkeypatch, status, expected_attempts):
+    import httpx
+
+    request = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+    error = httpx.HTTPStatusError(
+        "private provider payload", request=request, response=httpx.Response(status, request=request)
+    )
+    client = _client(error)
+    metrics = []
+    monkeypatch.setattr(core, "_new_client", lambda model: client)
+    monkeypatch.setattr(core, "log_inference_metrics", metrics.append)
+    waits = []
+    original_sleep = asyncio.sleep
+
+    async def sleep(delay):
+        waits.append(delay)
+        await original_sleep(0)
+
+    monkeypatch.setattr(core.asyncio, "sleep", sleep)
+    with pytest.raises(core.InferenceError):
+        asyncio.run(core._run_inference_async_helper([Model("test")], [InferenceCall(messages=[])]))
+    assert client.chat_completion.await_count == expected_attempts
+    assert waits == ([1, 2] if expected_attempts == 3 else [])
+    assert len(metrics) == 1
+    assert metrics[0].retry_count == expected_attempts - 1
+    client.close.assert_awaited_once()
+
+
+def test_metrics_log_and_totals_agree_under_event_permutations(monkeypatch, tmp_path):
+    import json
+    import itertools
+    import collections
+
+    events = [
+        tracking.InferenceMetrics(
+            request_id=str(i),
+            model_name=model,
+            stage="test",
+            input_tokens=10 + i,
+            output_tokens=i,
+            duration=i + 1,
+            queue_time=i / 2,
+            retry_count=i,
+            success=i != 1,
+            concurrency_level=2,
+            temperature=None,
+            encoding_name="cl100k_base",
+        )
+        for i, model in enumerate(("alpha", "beta", "alpha"))
+    ]
+    expected = None
+    for index, permutation in enumerate(itertools.permutations(events)):
+        monkeypatch.setattr(tracking, "_cost_data", collections.defaultdict(collections.Counter))
+        path = tmp_path / f"{index}.jsonl"
+        monkeypatch.setattr(tracking, "_metrics_log", path)
+        for event in permutation:
+            tracking.log_inference_metrics(event)
+        logged = [json.loads(line) for line in path.read_text().splitlines()]
+        assert [entry["request_id"] for entry in logged] == [event.request_id for event in permutation]
+        summary = tracking.get_performance_summary()
+        assert summary["total_calls"] == len(logged) == 3
+        assert summary["total_input_tokens"] == sum(entry["input_tokens"] for entry in logged) == 33
+        assert summary["success_rate"] == 2 / 3
+        summary.pop("models")  # insertion order is intentionally preserved, not a metric
+        expected = summary if expected is None else expected
+        assert summary == expected
+        assert tracking.get_performance_summary("alpha")["total_calls"] == 2
+        assert tracking.get_performance_summary("missing")["total_calls"] == 0
+
+
+def test_unwritable_metrics_log_preserves_in_memory_counts(monkeypatch, tmp_path):
+    import collections
+
+    monkeypatch.setattr(tracking, "_cost_data", collections.defaultdict(collections.Counter))
+    monkeypatch.setattr(tracking, "_metrics_log", tmp_path)  # opening a directory as a file fails
+    event = tracking.InferenceMetrics("id", "test", "test", 3, 2, 1, 0, 0, True, 1, None, "cl100k_base")
+    tracking.log_inference_metrics(event)
+    assert tracking.get_performance_summary("test")["total_calls"] == 1
+
+
+def test_special_token_text_is_counted_literally():
+    encoding = tracking._get_encoding()
+    assert tracking._count_tokens("<|endoftext|>", encoding) > 0

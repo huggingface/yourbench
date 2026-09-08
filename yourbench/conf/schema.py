@@ -80,7 +80,6 @@ class IngestionConfig(BaseModel):
     run: bool = False
     source_documents_dir: str = "data/raw"
     output_dir: str = "data/processed"
-    upload_to_hub: bool = True
     llm_ingestion: bool = False
     pdf_dpi: int = 300
     pdf_llm_prompt: str = ""

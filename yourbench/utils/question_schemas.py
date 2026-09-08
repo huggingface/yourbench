@@ -40,27 +40,31 @@ class OpenEndedQuestion(BaseModel):
     """Default schema for open-ended questions generated from documents."""
 
     thought_process: str = Field(
-        description="Explain why this question effectively tests understanding of the document content."
+        default="", description="Explain why this question effectively tests understanding of the document content."
     )
     question_type: OPEN_ENDED_QUESTION_TYPES = Field(
-        description="The type of question that best categorizes this entry."
+        default="factual", description="The type of question that best categorizes this entry."
     )
     question: str = Field(
         description="The question text. Do not include meta-references like 'according to the text'."
     )
     answer: str = Field(description="Complete, accurate answer to the question.")
-    estimated_difficulty: int = Field(ge=1, le=10, description="Difficulty rating from 1 (easiest) to 10 (hardest).")
-    citations: list[str] = Field(description="Exact quotes from the source text that support the answer.")
+    estimated_difficulty: int = Field(
+        default=5, ge=1, le=10, description="Difficulty rating from 1 (easiest) to 10 (hardest)."
+    )
+    citations: list[str] = Field(
+        default_factory=list, description="Exact quotes from the source text that support the answer."
+    )
 
 
 class MultiChoiceQuestion(BaseModel):
     """Default schema for multiple-choice questions generated from documents."""
 
     thought_process: str = Field(
-        description="Explain why this question effectively tests understanding of the document content."
+        default="", description="Explain why this question effectively tests understanding of the document content."
     )
     question_type: MULTI_CHOICE_QUESTION_TYPES = Field(
-        description="The type of question that best categorizes this entry."
+        default="factual", description="The type of question that best categorizes this entry."
     )
     question: str = Field(
         description="The question text. Do not include meta-references like 'according to the text'."
@@ -74,8 +78,12 @@ class MultiChoiceQuestion(BaseModel):
         pattern=r"^[A-D]$",
         description="The correct answer letter (A, B, C, or D).",
     )
-    estimated_difficulty: int = Field(ge=1, le=10, description="Difficulty rating from 1 (easiest) to 10 (hardest).")
-    citations: list[str] = Field(description="Exact quotes from the source text that support the correct answer.")
+    estimated_difficulty: int = Field(
+        default=5, ge=1, le=10, description="Difficulty rating from 1 (easiest) to 10 (hardest)."
+    )
+    citations: list[str] = Field(
+        default_factory=list, description="Exact quotes from the source text that support the correct answer."
+    )
 
 
 # Mapping from mode to default schema

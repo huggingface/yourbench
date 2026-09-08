@@ -1,171 +1,127 @@
-"""Tests for question rewriting pipeline fixes from PR #181.
+"""Rewriting contract exercised through real local datasets and rendered prompts."""
 
-These tests verify:
-1. STAGE_TAG is used correctly (not wrapped in extra list)
-2. QuestionRow validation handles missing question_mode field
-3. Graceful handling when multi_hop_questions subset doesn't exist
-"""
+import json
 
-import unittest
-from unittest.mock import Mock, patch
+import pytest
 
 from datasets import Dataset
-from yourbench.pipeline.question_rewriting import (
-    STAGE_TAG,
-    _process_question_type,
-    _build_question_rewriting_calls,
-    _process_question_rewriting_responses,
+from yourbench.pipeline import question_rewriting
+from yourbench.conf.loader import resolve_config
+from yourbench.utils.dataset_engine import custom_load_dataset, custom_save_dataset
+
+
+@pytest.fixture
+def rewrite_case(tmp_path):
+    config = resolve_config({
+        "hf_configuration": {
+            "hf_dataset_name": "rewrite",
+            "local_dataset_dir": str(tmp_path / "data"),
+            "push_to_hub": False,
+        },
+        "model_list": [{"model_name": "editor"}],
+        "pipeline": {"question_rewriting": {}},
+    })
+    docs = Dataset.from_list([
+        {
+            "document_id": "policy-a",
+            "document_text": "Refunds within 30 days",
+            "document_summary": "Refund rule",
+            "chunks": [{"chunk_id": "same", "chunk_text": "Refunds within 30 days"}],
+        },
+        {
+            "document_id": "policy-b",
+            "document_text": "No refunds on sale items",
+            "document_summary": "Sale exception",
+            "chunks": [{"chunk_id": "same", "chunk_text": "No refunds on sale items"}],
+        },
+    ])
+    rows = [
+        {
+            "question": "How policies differ?",
+            "self_answer": "Sale items are excluded",
+            "document_id": "cross",
+            "sources": [
+                {"document_id": "policy-a", "chunk_id": "same"},
+                {"document_id": "policy-b", "chunk_id": "same"},
+            ],
+            "question_mode": "open-ended",
+            "custom_rubric": ["Compare exception"],
+            "question_data_json": '{"question":"How policies differ?"}',
+        },
+        {
+            "question": "Sale refundable?",
+            "self_answer": "No",
+            "document_id": "policy-b",
+            "sources": [{"document_id": "policy-b", "chunk_id": "same"}],
+            "question_mode": "open-ended",
+            "custom_rubric": ["State exclusion"],
+            "question_data_json": '{"question":"Sale refundable?"}',
+        },
+    ]
+    custom_save_dataset(docs, config, subset="chunked", push_to_hub=False)
+    custom_save_dataset(Dataset.from_list(rows), config, subset="cross_document_questions", push_to_hub=False)
+    return config, rows
+
+
+def test_rewriting_uses_owned_sources_and_preserves_payload_for_every_model(rewrite_case, monkeypatch):
+    config, original = rewrite_case
+
+    def infer(config, step, calls):
+        assert step == "question_rewriting"
+        assert len(calls) == 2
+        first, second = [call.messages[1]["content"] for call in calls]
+        assert "Refunds within 30 days" in first and "No refunds on sale items" in first
+        assert '"document_id": "policy-a"' in first and '"document_id": "policy-b"' in first
+        assert "No refunds on sale items" in second and "Refunds within 30 days" not in second
+        assert "Sale items are excluded" in first
+        assert '"question"' in calls[0].messages[0]["content"]
+        return {
+            model: [
+                json.dumps({"question": f"{model} revised {i}?", "rationale": "Clarified wording"}) for i in range(2)
+            ]
+            for model in ["editor", "reviewer"]
+        }
+
+    monkeypatch.setattr(question_rewriting, "run_inference", infer)
+    question_rewriting.run(config)
+    result = custom_load_dataset(config, subset="cross_document_questions_rewritten")
+    assert len(result) == 4
+    for index, row in enumerate(result):
+        source = original[index % 2]
+        assert row["question"] == f"{['editor', 'reviewer'][index // 2]} revised {index % 2}?"
+        assert row["original_question"] == source["question"]
+        for field in ["self_answer", "sources", "custom_rubric", "question_data_json"]:
+            assert row[field] == source[field]
+
+
+@pytest.mark.parametrize(
+    "replies",
+    [
+        ['{"question":"First?","question":"Second?","rationale":"Duplicate"}'] * 2,
+        ['{"question":"Question?","rationale":NaN}'] * 2,
+        [],
+        ['{"question":"Only one?","rationale":"Edit"}'],
+        ['{"question":"Good?","rationale":"Edit"}', '{"question":"","rationale":"Bad"}'],
+        ['{"question":"Good?","rationale":"Edit"}', "<rewritten_question>Legacy</rewritten_question>"],
+    ],
 )
+def test_incomplete_or_invalid_rewrite_never_saves_partial_subset(rewrite_case, monkeypatch, replies):
+    config, _ = rewrite_case
+    monkeypatch.setattr(question_rewriting, "run_inference", lambda *args: {"editor": replies})
+    with pytest.raises(ValueError, match="rewrit"):
+        question_rewriting.run(config)
+    with pytest.raises(FileNotFoundError):
+        custom_load_dataset(config, subset="cross_document_questions_rewritten")
 
 
-class TestQuestionRewritingFixes(unittest.TestCase):
-    """Test cases for PR #181 fixes."""
+def test_unresolved_sources_fail_before_request(rewrite_case, monkeypatch):
+    config, rows = rewrite_case
+    rows[0]["sources"][0]["chunk_id"] = "missing"
+    custom_save_dataset(Dataset.from_list(rows), config, subset="cross_document_questions", push_to_hub=False)
 
-    def test_stage_tag_is_flat_list(self):
-        """Test that STAGE_TAG is already a list and not wrapped again."""
-        self.assertEqual(STAGE_TAG, ["question_rewriting"])
+    def unexpected(*args):
+        pytest.fail("Inference must not run with missing evidence")
 
-    def test_inference_call_receives_flat_tags(self):
-        """Test that InferenceCall receives tags as flat list, not nested.
-
-        This test verifies the fix for issue #178 where tags=[STAGE_TAG] created
-        a nested list [["question_rewriting"]] instead of ["question_rewriting"],
-        causing "sequence item 0: expected str instance, list found" error.
-        """
-        dataset = Dataset.from_list([
-            {
-                "question": "What is the capital?",
-                "chunks": "Paris is the capital.",
-                "document_summary": "Summary",
-                "self_answer": "Paris",
-            }
-        ])
-
-        calls, indices = _build_question_rewriting_calls(
-            dataset=dataset,
-            system_prompt="System prompt",
-            user_prompt_template="Q: {original_question}\nA: {answer}\nChunk: {chunk_text}\nSummary: {document_summary}\n{additional_instructions}",
-            additional_instructions="Rewrite the question",
-        )
-
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(len(indices), 1)
-        # This is the critical fix - tags should be ["question_rewriting"], not [["question_rewriting"]]
-        self.assertEqual(calls[0].tags, ["question_rewriting"])
-        self.assertIsInstance(calls[0].tags, list)
-        self.assertEqual(len(calls[0].tags), 1)
-        self.assertIsInstance(calls[0].tags[0], str)
-
-    def test_question_mode_default_for_missing_field(self):
-        """Test that question_mode defaults to 'open-ended' when missing from dataset.
-
-        This test verifies the fix where older datasets don't have question_mode field,
-        causing QuestionRow validation to fail. The fix adds a default value before
-        creating the QuestionRow object.
-        """
-        responses = {"model-1": ["<rewritten_question>What is the capital city?</rewritten_question>"]}
-        indices = [0]
-
-        # Original dataset WITHOUT question_mode field (simulating old datasets)
-        # Include all required QuestionRow fields
-        original_dataset = Dataset.from_list([
-            {
-                "document_id": "doc1",
-                "additional_instructions": "Test instructions",
-                "question": "What is capital?",
-                "self_answer": "Paris",
-                "estimated_difficulty": 5,
-                "self_assessed_question_type": "factual",
-                "generating_model": "test-model",
-                "thought_process": "Test thought",
-                "raw_response": "Test response",
-                "chunk_id": "chunk1",  # Required - either chunk_id or source_chunk_ids
-                # Note: question_mode is missing - this is the bug we're fixing
-            }
-        ])
-
-        # Process responses - should not raise validation error
-        rewritten_rows = _process_question_rewriting_responses(responses, indices, original_dataset)
-
-        # Verify we got a row back (the fix allows this to succeed)
-        self.assertEqual(len(rewritten_rows), 1, "Should successfully process row even without question_mode")
-
-        # Verify the question was actually rewritten
-        self.assertEqual(rewritten_rows[0]["question"], "What is the capital city?")
-
-        # Note: question_mode is NOT in to_dict() output, but it was used during validation
-        # The important thing is that the row was processed successfully
-
-    @patch("yourbench.pipeline.question_rewriting.custom_load_dataset")
-    @patch("yourbench.pipeline.question_rewriting.run_inference")
-    @patch("yourbench.pipeline.question_rewriting.custom_save_dataset")
-    def test_graceful_handling_missing_subset(self, mock_save, mock_inference, mock_load):
-        """Test that missing subset is handled gracefully without crashing.
-
-        This test verifies the fix where multi_hop_questions subset might not exist
-        in some datasets, and the pipeline should skip gracefully instead of crashing.
-        """
-        # Mock custom_load_dataset to raise exception for missing subset
-        mock_load.side_effect = FileNotFoundError("Subset 'multi_hop_questions' not found in dataset")
-        mock_config = Mock()
-
-        # Call _process_question_type - should NOT raise exception
-        try:
-            _process_question_type(
-                config=mock_config,
-                question_type="multi-hop",
-                load_subset="multi_hop_questions",
-                save_subset="multi_hop_questions_rewritten",
-                system_prompt="System",
-                user_prompt_template="Template",
-                additional_instructions="Instructions",
-            )
-            # If we get here, it means the function handled the missing subset gracefully
-            success = True
-        except Exception as e:
-            # Should not reach here
-            success = False
-            self.fail(f"Function raised exception for missing subset: {e}")
-
-        # Verify we successfully handled the missing subset
-        self.assertTrue(success)
-
-        # Verify custom_load_dataset was called
-        mock_load.assert_called_once()
-
-        # Verify inference was NOT called (since subset is missing)
-        mock_inference.assert_not_called()
-
-        # Verify save was NOT called (since no data to save)
-        mock_save.assert_not_called()
-
-    @patch("yourbench.pipeline.question_rewriting.custom_load_dataset")
-    def test_storage_failures_propagate(self, mock_load):
-        """Test that non-missing-subset exceptions are caught by outer try-except.
-
-        Note: The function has an outer try-except that catches all exceptions
-        and logs them, so even non-'not found' exceptions won't be raised.
-        This test verifies that the inner try-except only catches 'not found' errors,
-        while the outer try-except handles everything else.
-        """
-        # Mock custom_load_dataset to raise a different exception
-        mock_load.side_effect = Exception("Connection error")
-        mock_config = Mock()
-
-        with self.assertRaisesRegex(Exception, "Connection error"):
-            _process_question_type(
-                config=mock_config,
-                question_type="multi-hop",
-                load_subset="multi_hop_questions",
-                save_subset="multi_hop_questions_rewritten",
-                system_prompt="System",
-                user_prompt_template="Template",
-                additional_instructions="Instructions",
-            )
-
-        # Verify custom_load_dataset was called
-        mock_load.assert_called_once()
-
-
-if __name__ == "__main__":
-    unittest.main()
+    monkeypatch.setattr(question_rewriting, "run_inference", unexpected)
+    with pytest.raises(ValueError, match="Cannot resolve"):
+        question_rewriting.run(config)

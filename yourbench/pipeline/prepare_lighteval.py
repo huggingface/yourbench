@@ -5,7 +5,7 @@ from typing import Any
 from loguru import logger
 
 from datasets import Dataset
-from yourbench.utils.dataset_engine import custom_load_dataset, custom_save_dataset
+from yourbench.utils.dataset_engine import MissingSubsetError, custom_load_dataset, custom_save_dataset
 from yourbench.utils.logging_context import log_stage
 from yourbench.utils.question_models import question_dataset
 
@@ -99,7 +99,7 @@ def _run_impl(config) -> None:
         required = generation.run or subset != default_subset
         try:
             dataset = custom_load_dataset(config=config, subset=subset)
-        except FileNotFoundError:
+        except MissingSubsetError:
             if required:
                 raise
             continue
@@ -109,7 +109,7 @@ def _run_impl(config) -> None:
         chunked = custom_load_dataset(config=config, subset=stage.chunked_subset)
         try:
             summarized = custom_load_dataset(config=config, subset=stage.summarized_subset)
-        except FileNotFoundError:
+        except MissingSubsetError:
             summarized = []
         documents = build_document_lookup(chunked, summarized)
         records = [make_record(row, kind, documents, mode) for kind, mode, dataset in inputs for row in dataset]

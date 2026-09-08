@@ -170,25 +170,6 @@ def test_preflight_allows_explicit_unsummarized_input(tmp_path):
     validate_pipeline(cfg)
 
 
-def test_rewriting_keeps_custom_payload_and_sources():
-    from yourbench.pipeline.question_rewriting import _process_question_rewriting_responses
-
-    rows = Dataset.from_list([
-        {
-            "question": "Before?",
-            "self_answer": "answer",
-            "custom": {"a": [1, 2]},
-            "sources": [{"document_id": "a", "chunk_id": "c"}],
-        }
-    ])
-    rewritten = _process_question_rewriting_responses(
-        {"model": ["<rewritten_question>After?</rewritten_question>"]}, [0], rows
-    )
-    assert rewritten[0]["custom"] == {"a": [1, 2]}
-    assert rewritten[0]["sources"] == rows[0]["sources"]
-    assert rewritten[0]["question"] == "After?"
-
-
 def test_resumed_rewriting_selects_existing_outputs(tmp_path):
     from yourbench.conf.loader import resolve_config
     from yourbench.pipeline.handler import validate_pipeline

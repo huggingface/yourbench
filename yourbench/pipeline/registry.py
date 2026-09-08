@@ -43,7 +43,7 @@ STAGES = {
             True,
             "question_generation.cross_document",
         ),
-        Stage("question_rewriting", "Question Rewriting", requires_model=True),
+        Stage("question_rewriting", "Question Rewriting", ("chunked",), requires_model=True),
         Stage("prepare_lighteval", "LightEval Preparation", ("chunked",), ("prepared_lighteval",)),
         Stage("citation_score_filtering", "Citation Scoring", ("prepared_lighteval",), ("prepared_lighteval",)),
     )
@@ -67,7 +67,7 @@ def artifacts_for_stage(stage, config):
     if stage == "citation_score_filtering":
         return (cfg.subset,), (cfg.subset,)
     if stage == "question_rewriting":
-        return (), tuple(
+        return spec.inputs, tuple(
             f"{subset}_rewritten" for name, subset in QUESTION_SUBSETS.items() if getattr(config.pipeline, name).run
         )
     return spec.inputs, spec.outputs

@@ -300,7 +300,6 @@ def init(
             "ingestion": {
                 "source_documents_dir": str(source.expanduser().resolve()),
                 "output_dir": "processed",
-                "upload_to_hub": False,
             },
             "summarization": {},
             "chunking": {},

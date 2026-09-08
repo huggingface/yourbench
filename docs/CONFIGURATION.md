@@ -154,7 +154,6 @@ pipeline:
   ingestion:
     source_documents_dir: data/raw           # Required
     output_dir: data/processed               # Default: data/processed
-    upload_to_hub: true                      # Default: true
     llm_ingestion: false                     # Use LLM for PDF processing
     pdf_dpi: 300                             # DPI for PDF rendering
     pdf_llm_prompt: path/to/prompt.md       # Custom PDF extraction prompt
@@ -333,9 +332,7 @@ class DataFormat(BaseModel):
 - Use `Field(description=...)` to guide the LLM
 - Custom fields are automatically preserved in output
 
-**Field aliasing:** Certain fields are automatically mapped:
-- `reasoning`, `explanation` → `thought_process`
-- String `difficulty` (easy/medium/hard) → integer `estimated_difficulty` (1-10)
+Custom field names and values are preserved literally. Declare defaults, aliases, or conversions explicitly in your Pydantic schema; YourBench does not guess their meaning.
 
 See [Custom Schemas Guide](./CUSTOM_SCHEMAS.md) for detailed examples.
 
@@ -487,3 +484,13 @@ Chunking honors `token_overlap` and `encoding_name`, requires overlap smaller th
 Enabling question rewriting routes active generation outputs to their rewritten subsets unless export subset names are explicitly set. Missing required inputs, model failures, and generation with no valid questions fail the run. `run.json` beside the local dataset directory records completion/failure; existing artifacts from previous runs may still exist after a failure.
 
 The compiled natural-language recipe saves locally and exports JSONL; it does not upload to the Hub. For YAML runs, `push_to_hub: false` also disables remote reads and dataset-card publication. Named artifacts must be saved as a `DatasetDict`. Export files remain under the configured JSONL directory.
+
+### Flat-core interface changes
+
+Generation prompts now request a JSON array of question objects. Planning, summarization, and rewriting use the same JSON decoder: one bare value, a whole Markdown JSON fence, or a whole legacy `<output_json>` envelope. Surrounding prose, concatenated values, duplicate keys, and nonfinite numbers are errors. Custom summary prompts must return `{"summary": "..."}`; rewrite prompts must return `{"question": "...", "rationale": "..."}`. Summary and rewrite each require exactly one model and complete response batches.
+
+The redundant `pipeline.ingestion.upload_to_hub` option was removed. Use `hf_configuration.push_to_hub` for all stages. `llm_ingestion` applies to PDF pages; other formats use their normal converters. A conversion failure stops ingestion before publishing a partial dataset. Document identity depends on the relative source path and text, so moving a corpus preserves IDs. Converted Markdown keeps the original extension, for example `policy.txt.md`.
+
+Local dataset writes serialize into a sibling staging directory and restore the previous dataset if promotion fails. Corrupt existing stores are errors, never treated as empty stores or missing subsets. JSONL files are replaced only after successful serialization. This protects individual writes; an entire pipeline run is not one transaction, and concurrent writers to the same output directory are not supported. Remote append requires an existing readable target; use `concat_if_exist: false` for initial publication.
+
+Inference events are recorded as JSONL in `logs/inference.jsonl`; the duplicate CSV reporting path was removed. Events include success/failure, timing, and token counts without prompt or credential contents.

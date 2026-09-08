@@ -12,7 +12,7 @@ from rich.progress import Progress, TextColumn, SpinnerColumn, TimeElapsedColumn
 
 from yourbench.conf.loader import get_enabled_stages
 from yourbench.pipeline.registry import STAGES, artifacts_for_stage
-from yourbench.utils.dataset_engine import custom_load_dataset
+from yourbench.utils.dataset_engine import MissingSubsetError, validate_storage, custom_load_dataset
 
 
 class PipelineError(RuntimeError):
@@ -26,6 +26,7 @@ def _get_stage_function(stage: str):
 
 def validate_pipeline(config) -> None:
     """Check model assignments and artifact dependencies before spending tokens."""
+    validate_storage(config)
     available = set()
     for stage in get_enabled_stages(config):
         spec = STAGES[stage]
@@ -34,14 +35,9 @@ def validate_pipeline(config) -> None:
             if not names:
                 raise PipelineError(f"Stage '{stage}' requires a model; configure model_list or OPENAI_MODEL")
         if stage == "ingestion":
-            source = Path(config.pipeline.ingestion.source_documents_dir)
-            extensions = config.pipeline.ingestion.supported_file_extensions
-            output = Path(config.pipeline.ingestion.output_dir).resolve()
-            if not source.is_dir() or not any(
-                p.is_file() and p.suffix.lower() in extensions and not p.resolve().is_relative_to(output)
-                for p in source.rglob("*")
-            ):
-                raise PipelineError(f"No supported source documents found in {source}")
+            from yourbench.pipeline.ingestion import source_files
+
+            source_files(config.pipeline.ingestion)
         inputs, outputs = artifacts_for_stage(stage, config)
         if stage in {"question_rewriting", "prepare_lighteval"}:
             from yourbench.pipeline.prepare_lighteval import QUESTION_INPUTS
@@ -57,7 +53,7 @@ def validate_pipeline(config) -> None:
                     continue
                 try:
                     existing = custom_load_dataset(config, subset)
-                except FileNotFoundError:
+                except MissingSubsetError:
                     continue
                 if len(existing):
                     selected.append(subset)
@@ -75,7 +71,7 @@ def validate_pipeline(config) -> None:
             if subset not in available:
                 try:
                     dataset = custom_load_dataset(config, subset)
-                except FileNotFoundError as exc:
+                except MissingSubsetError as exc:
                     raise PipelineError(
                         f"Stage '{stage}' requires '{subset}'; enable its producer or supply saved data"
                     ) from exc

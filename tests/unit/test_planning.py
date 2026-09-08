@@ -57,7 +57,6 @@ def test_plan_only_persists_reusable_local_recipe(source, tmp_path, planner, mon
     pipeline.assert_not_called()
     config = load_config(output / "config.yaml")
     assert not config.hf_configuration.push_to_hub
-    assert not config.pipeline.ingestion.upload_to_hub
     assert config.hf_configuration.export_jsonl
     assert config.pipeline.single_hop_question_generation.run
     assert not config.pipeline.multi_hop_question_generation.run

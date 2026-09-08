@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from datasets import Dataset
+from yourbench.utils.dataset_engine import MissingSubsetError
 from yourbench.utils.parsing_engine import shuffle_mcq, parse_single_hop_responses, _remove_duplicate_questions
 from yourbench.pipeline.prepare_lighteval import _run_impl, make_record, build_document_lookup
 from yourbench.utils.cross_document_utils import create_cross_document_dataset
@@ -14,11 +15,9 @@ from yourbench.pipeline.question_generation._core import _get_system_prompt
 @pytest.mark.parametrize("multi", [False, True])
 def test_default_schema_is_rendered(mode, multi):
     name = ("multi_hop_" if multi else "single_hop_") + "system_prompt" + ("_multi" if mode == "multi-choice" else "")
-    stage = SimpleNamespace(**{name: "{schema_definition}\n{example_output}\n{critical_reminders}"})
+    stage = SimpleNamespace(**{name: "{schema_definition}"})
     prompt = _get_system_prompt(stage, mode, multi)
     assert "{schema_definition}" not in prompt
-    assert "{example_output}" not in prompt
-    assert "{critical_reminders}" not in prompt
     assert "question" in prompt
 
 
@@ -34,7 +33,7 @@ def test_custom_schema_validates_and_preserves_aliases(tmp_path):
     )
     assert len(rows) == 1
     assert rows[0]["difficulty"] == "hard"
-    assert rows[0]["estimated_difficulty"] == 7
+    assert "estimated_difficulty" not in rows[0]
     assert rows[0]["question_data"] == good
     assert rows[0]["sources"] == [{"document_id": "doc", "chunk_id": "chunk"}]
     exported = make_record(
@@ -114,7 +113,7 @@ def test_export_union_and_empty_subset(monkeypatch):
 
     def load(**kwargs):
         if kwargs["subset"] not in subsets:
-            raise FileNotFoundError(kwargs["subset"])
+            raise MissingSubsetError(kwargs["subset"])
         return subsets[kwargs["subset"]]
 
     monkeypatch.setattr(export, "custom_load_dataset", load)
@@ -287,3 +286,30 @@ def test_custom_payload_cannot_override_execution_metadata(tmp_path):
     assert row.get("additional_instructions", "") == ""
     assert row["question_data"] == candidate
     assert row["raw_response"] != "fake"
+
+
+def test_custom_field_meanings_survive_generation_and_export(tmp_path):
+    schema = tmp_path / "semantics.py"
+    schema.write_text(
+        "from pydantic import BaseModel\nclass DataFormat(BaseModel):\n"
+        "    question: str\n    answer: str\n    reasoning: list[str]\n"
+        "    difficulty: str\n    complexity: dict[str, str]\n"
+    )
+    payload = {
+        "question": "What is the runtime?",
+        "answer": "Linear.",
+        "reasoning": ["Inspect the loop", "Count iterations"],
+        "difficulty": "requires proof, not a numeric rating",
+        "complexity": {"runtime": "O(n)", "space": "O(1)"},
+    }
+    row = parse_single_hop_responses(
+        {"m": [json.dumps([payload])]}, [(0, "d", "c")], {"question_schema": str(schema)}
+    )[0]
+    exported = make_record(
+        row, "single_hop", {"d": {"text": "A single loop.", "summary": "", "chunks": {"c": "A single loop."}}}
+    )
+    for field, expected in payload.items():
+        assert exported[field] == expected
+    assert "estimated_difficulty" not in exported
+    assert "thought_process" not in exported
+    assert exported["question_data"] == payload

@@ -69,24 +69,9 @@ class DataFormat(BaseModel):
     notes: str = Field(default="", description="Additional notes")
 ```
 
-## Field Aliasing
+## Field semantics
 
-Certain field names are automatically mapped to standard output columns:
-
-| Your Field Name | Maps To | Notes |
-|-----------------|---------|-------|
-| `reasoning` | `thought_process` | Explanation field |
-| `explanation` | `thought_process` | Explanation field |
-| `difficulty` (string) | `estimated_difficulty` (int) | See mapping below |
-
-**Difficulty mapping:**
-
-| String Value | Integer Value |
-|--------------|---------------|
-| `beginner`, `easy` | 2 |
-| `intermediate`, `medium` | 5 |
-| `advanced`, `hard` | 7 |
-| `expert` | 9 |
+YourBench preserves custom field names and values literally. A `difficulty` string stays a string; a `reasoning` list stays a list. There is no inferred mapping to `estimated_difficulty` or `thought_process`. Use explicit Pydantic validators or aliases when your schema needs conversions. Default question schemas define their own metadata defaults.
 
 ## Example Schemas
 
@@ -208,7 +193,7 @@ class MultiChoiceQuestion(BaseModel):
 
 ## Validation and export contracts
 
-Custom `DataFormat` models are validated against each generated candidate before normalization. Required fields, constraints, and nested structures must validate; invalid candidates are rejected and a run with no valid questions fails. Custom schemas must expose nonempty `question` and `answer` fields. Default question schemas are also rendered into prompts automatically.
+Custom `DataFormat` models are validated against each generated candidate before attaching runtime metadata. Required fields, constraints, and nested structures must validate; invalid candidates are rejected and a run with no valid questions fails. Custom schemas must expose nonempty `question` and `answer` fields. Default question schemas are also rendered into prompts automatically.
 
 `question_data` preserves the validated original payload, including pre-shuffle multiple-choice data. Runtime fields such as source references and model identity cannot be overridden by generated fields. Additional fields survive evaluation export. Compatible schemas can be combined; conflicting types for a shared field produce an explicit schema-conflict error. Export such schemas separately or make the shared types consistent.
 
