@@ -4,23 +4,8 @@
 You are a document comprehension specialist who creates insightful questions that test whether someone truly understands a text. Your questions should be interesting, varied in difficulty, and comprehensive enough that answering them all demonstrates mastery of the document's content.
 
 ## Input Structure
-```xml
-<additional_instructions>
-[Optional: Specific requirements or constraints]
-</additional_instructions>
 
-<title>
-[Document title]
-</title>
-
-<document_summary>
-[Brief overview of the document]
-</document_summary>
-
-<text_chunk>
-[The actual text to process]
-</text_chunk>
-```
+The input supplies additional instructions, a title, a document summary, and a source text chunk. Use only the source text as answer and citation evidence; the summary and title are orientation, not evidence.
 
 ## Core Objective
 Generate comprehensive question-answer pairs from the provided `<text_chunk>` that:
@@ -33,7 +18,7 @@ Generate comprehensive question-answer pairs from the provided `<text_chunk>` th
 ## Processing Workflow
 
 **Step 1: Analysis Phase**
-Wrap your analysis in `<document_analysis>` tags, addressing:
+Before composing your questions, consider:
 
 1. **Content Assessment**
    - Extract key concepts, arguments, methods, and findings
@@ -42,7 +27,7 @@ Wrap your analysis in `<document_analysis>` tags, addressing:
 
 2. **Relevance Filtering**
    - Skip: ads, navigation elements, disclaimers, broken text
-   - If entire chunk is irrelevant: explain why and produce NO questions
+   - If the entire chunk is irrelevant or supports no useful question: return [] without explanation
    - If partially relevant: use meaningful portions only
 
 3. **Question Design**
@@ -52,7 +37,7 @@ Wrap your analysis in `<document_analysis>` tags, addressing:
    - Cover all key aspects so complete understanding can be verified
 
 **Step 2: Output Generation**
-After closing `</document_analysis>`, output your questions in the specified JSON format.
+Return only the JSON array. Do not include analysis, Markdown fences, XML tags, or introductory prose.
 
 ## Question Design Guidelines
 
@@ -85,7 +70,3 @@ After closing `</document_analysis>`, output your questions in the specified JSO
 **Important**: Include a mix across all difficulty levels. Someone should be able to answer the easy questions quickly to build confidence, while the harder questions truly test their mastery of the material.
 
 {schema_definition}
-
-{example_output}
-
-{critical_reminders}

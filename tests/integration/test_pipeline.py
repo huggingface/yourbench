@@ -57,7 +57,6 @@ def mock_config(temp_dir):
                 "run": True,
                 "source_documents_dir": os.path.join(temp_dir, "raw"),
                 "output_dir": os.path.join(temp_dir, "processed"),
-                "upload_to_hub": True,
                 "llm_ingestion": False,
                 "pdf_dpi": 300,
                 "supported_file_extensions": [".md", ".txt", ".pdf"],
@@ -76,7 +75,7 @@ def mock_config(temp_dir):
                 "h_min": 2,
                 "h_max": 5,
                 "num_multihops_factor": 2,
-                "token_overlap": 512,
+                "token_overlap": 32,
                 "encoding_name": "cl100k_base",
             },
             "single_hop_question_generation": {
@@ -132,14 +131,17 @@ def test_ingestion_stage(mock_config, temp_dir, mock_no_docs):
             f.write("This is a test document for ingestion.")
 
     with (
-        patch("yourbench.pipeline.ingestion.InferenceClient"),
         patch("yourbench.pipeline.ingestion._convert_file") as mock_convert,
         patch("yourbench.pipeline.ingestion.custom_save_dataset") as mock_save,
     ):
         mock_convert.return_value = "mocked content"
         from yourbench.pipeline.ingestion import run
 
-        run(mock_config)
+        if mock_no_docs:
+            with pytest.raises(ValueError, match="No supported"):
+                run(mock_config)
+        else:
+            run(mock_config)
 
         if mock_no_docs:
             mock_convert.assert_not_called()
@@ -161,20 +163,13 @@ def test_summarization_stage(mock_config):
         patch("yourbench.pipeline.summarization.custom_load_dataset", return_value=mock_dataset),
         patch("yourbench.pipeline.summarization.custom_save_dataset") as mock_save,
         patch("yourbench.pipeline.summarization.run_inference") as mock_run_inference,
-        patch("yourbench.pipeline.summarization.extract_content_from_xml_tags") as mock_extract,
     ):
         mock_run_inference.return_value = {
             "fake_model": [
-                "<final_summary>Summary for doc1</final_summary>",
-                "<final_summary>Summary for doc2</final_summary>",
+                '{"summary":"Summary for doc1"}',
+                '{"summary":"Summary for doc2"}',
             ]
         }
-        mock_extract.side_effect = (
-            lambda text, tag: f"Summary for doc{text.split('doc')[1].split('<')[0]}"
-            if tag == "final_summary"
-            else None
-        )
-
         from yourbench.pipeline.summarization import run
 
         run(mock_config)
@@ -266,6 +261,7 @@ def test_lighteval_stage(mock_config):
         "source_chunk_ids": [["chunk1", "chunk2"]],
         "question": ["Multi-hop question?"],
         "self_answer": ["A"],
+        "choices": [["(A) First", "(B) Second", "(C) Third", "(D) Fourth"]],
         "estimated_difficulty": [7],
         "self_assessed_question_type": ["reasoning"],
         "question_mode": ["multi-choice"],

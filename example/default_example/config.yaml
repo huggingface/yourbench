@@ -1,14 +1,22 @@
 hf_configuration:
-  hf_dataset_name: yourbench-simple-example
-
+  hf_dataset_name: default-example
+  push_to_hub: false
+  upload_card: false
+  private: true
+  local_saving: true
+  local_dataset_dir: ./output/datasets
+  export_jsonl: true
+  jsonl_export_dir: ./output/jsonl
 model_list:
-  - model_name: zai-org/GLM-4.5
-
+- model_name: $YOURBENCH_MODEL
+  base_url: $YOURBENCH_BASE_URL
+  api_key: $YOURBENCH_API_KEY
+  max_concurrent_requests: 4
 pipeline:
   ingestion:
-    source_documents_dir: example/default_example/data
-    output_dir: example/default_example/processed
-  summarization:
-  chunking:
-  single_hop_question_generation:
-  prepare_lighteval:
+    source_documents_dir: ../sample_documents
+    output_dir: ./output/processed
+  summarization: null
+  chunking: null
+  single_hop_question_generation: null
+  prepare_lighteval: {}

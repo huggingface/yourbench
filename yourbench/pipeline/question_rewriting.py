@@ -1,275 +1,98 @@
-"""
-Question question_rewriting Pipeline Stage
+"""Rewrite questions against their actual source passages, preserving original records."""
 
-This module implements a stage that takes generated questions (both single-hop and multi-hop)
-and rewrites them using an LLM while preserving their meaning and answerability.
+import json
+from typing import Annotated
 
-Features:
-- Preserves question meaning and answerability
-- Maintains all metadata from original questions
-- Works with both single-hop and multi-hop questions
-- Configurable question_rewriting instructions
-"""
+from pydantic import BaseModel, ValidationError, StringConstraints
 
-from typing import Any, Dict, List, Optional
-from dataclasses import dataclass
-
-from loguru import logger
-
-from datasets import Dataset
-from yourbench.utils.dataset_engine import custom_load_dataset, custom_save_dataset
-from yourbench.utils.parsing_engine import extract_content_from_xml_tags
+from yourbench.pipeline.registry import QUESTION_SUBSETS
+from yourbench.utils.dataset_engine import MissingSubsetError, custom_load_dataset, custom_save_dataset
+from yourbench.utils.parsing_engine import decode_response_json
 from yourbench.utils.logging_context import log_stage
-from yourbench.utils.question_models import QuestionRow
+from yourbench.utils.question_models import question_dataset
+from yourbench.pipeline.prepare_lighteval import make_record, build_document_lookup
 from yourbench.utils.inference.inference_core import InferenceCall, run_inference
 
 
-STAGE_TAG = ["question_rewriting"]
+class RewriteResponse(BaseModel):
+    model_config = {"extra": "forbid"}
+    question: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+    rationale: str
 
 
-@dataclass
-class RewrittenQuestion:
-    """Container for a rewritten question with metadata."""
-
-    original_question: str
-    rewritten_question: str
-    question_rewriting_model: str
-    question_rewriting_rationale: str
-
-
-def _parse_question_rewriting_response(response: str) -> Optional[RewrittenQuestion]:
-    """
-    Parse the model's question_rewriting response to extract the rewritten question and rationale.
-
-    Args:
-        response: Raw model response
-
-    Returns:
-        RewrittenQuestion object or None if parsing fails
-    """
-    try:
-        rewritten_q = extract_content_from_xml_tags(response, "rewritten_question")
-        rationale = extract_content_from_xml_tags(response, "question_rewriting_rationale")
-
-        if not rewritten_q:
-            logger.warning("No rewritten question found in response")
-            return None
-
-        return RewrittenQuestion(
-            original_question="",  # Will be filled by caller
-            rewritten_question=rewritten_q.strip(),
-            question_rewriting_model="",  # Will be filled by caller
-            question_rewriting_rationale=rationale.strip() if rationale else "",
-        )
-    except Exception as e:
-        logger.error(f"Error parsing question_rewriting response: {e}")
-        return None
-
-
-def _build_question_rewriting_calls(
-    dataset: Dataset, system_prompt: str, user_prompt_template: str, additional_instructions: str
-) -> tuple[List[InferenceCall], List[int]]:
-    """
-    Build inference calls for question_rewriting questions.
-
-    Returns:
-        Tuple of (inference_calls, row_indices)
-    """
+def _build_question_rewriting_calls(dataset, stage, documents):
     calls = []
-    indices = []
-
-    for idx, row in enumerate(dataset):
-        # Extract relevant fields
-        question = row.get("question", "")
-        if not question:
-            logger.warning(f"Skipping row {idx} - no question found")
-            continue
-
-        # Get chunks based on question type
-        chunks_data = row.get("chunks", "")
-        if isinstance(chunks_data, list):
-            # For both multihop and single-hop, if chunks are a list, join them.
-            # This correctly handles empty, single-item, and multi-item lists.
-            # We use map(str, ...) to safely handle any non-string elements.
-            chunk_text = "\n\n".join(map(str, chunks_data))
-        else:
-            # For single-hop, chunks might be a single item (e.g., a string).
-            # We convert it to a string. Falsy values (like None or empty string) will result in an empty string.
-            chunk_text = str(chunks_data) if chunks_data else ""
-
-        summary = row.get("document_summary", "")
-        answer = row.get("self_answer", "")
-
-        # Build user prompt
-        user_prompt = user_prompt_template.format(
-            original_question=question,
-            answer=answer,
-            chunk_text=chunk_text,
-            document_summary=summary,
-            additional_instructions=additional_instructions,
+    for row in dataset:
+        if not row["question"].strip():
+            raise ValueError("Cannot rewrite an empty question")
+        context = make_record(row, "rewriting", documents)
+        content = stage.question_rewriting_user_prompt.format(
+            original_question=row["question"],
+            answer=context["ground_truth_answer"],
+            choices=json.dumps(row.get("choices") or [], ensure_ascii=False),
+            chunk_text=json.dumps(
+                [{**source, "text": text} for source, text in zip(context["sources"], context["chunks"], strict=True)],
+                ensure_ascii=False,
+            ),
+            document_summary=context["document_summary"],
+            additional_instructions=stage.additional_instructions,
         )
-
-        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
-
-        calls.append(InferenceCall(messages=messages, tags=STAGE_TAG))
-        indices.append(idx)
-
-    return calls, indices
-
-
-def _process_question_rewriting_responses(
-    responses: Dict[str, List[str]], indices: List[int], original_dataset: Dataset
-) -> List[Dict[str, Any]]:
-    """
-    Process model responses and create rewritten dataset rows.
-    """
-    rewritten_rows = []
-
-    for model_name, model_responses in responses.items():
-        if len(model_responses) != len(indices):
-            logger.warning(
-                f"Response count mismatch for model {model_name}. "
-                f"Expected {len(indices)} but got {len(model_responses)}. "
-                "This can happen if some inference calls failed. "
-                "Processing the responses that were returned."
+        calls.append(
+            InferenceCall(
+                messages=[
+                    {"role": "system", "content": stage.question_rewriting_system_prompt},
+                    {"role": "user", "content": content},
+                ],
+                tags=["question_rewriting"],
             )
+        )
+    return calls
 
-        for response, dataset_idx in zip(model_responses, indices):
-            if not response:
-                logger.warning(f"Skipping failed or empty response for original dataset row {dataset_idx}")
-                continue
 
-            original_row = original_dataset[dataset_idx]
-
-            # Parse the question_rewriting response
-            rewritten = _parse_question_rewriting_response(response)
-            if not rewritten:
-                logger.warning(f"Failed to parse response for row {dataset_idx} - skipping this row")
-                continue
-
-            # Create new row with all original data plus question_rewriting info
-            new_row_dict = dict(original_row)
-            new_row_dict.update({
-                "original_question": original_row["question"],
-                "question": rewritten.rewritten_question,
-                "question_rewriting_model": model_name,
-                "question_rewriting_rationale": rewritten.question_rewriting_rationale,
-                "raw_question_rewriting_response": response,
-            })
-
-            # Ensure question_mode is present (required by QuestionRow but may be missing from older datasets)
-            if "question_mode" not in new_row_dict:
-                new_row_dict["question_mode"] = "open-ended"  # Default for older datasets
-
+def _process_question_rewriting_responses(responses, original_dataset):
+    if not responses:
+        raise ValueError("No rewriting responses")
+    rows = []
+    for model, replies in responses.items():
+        if len(replies) != len(original_dataset):
+            raise ValueError(f"Incomplete rewriting batch: expected {len(original_dataset)}, received {len(replies)}")
+        for row, raw in zip(original_dataset, replies, strict=True):
             try:
-                # Validate and structure the data using QuestionRow
-                question_row = QuestionRow(**new_row_dict)
-                rewritten_rows.append(question_row.to_dict())
-            except (TypeError, ValueError) as e:
-                logger.warning(f"Skipping row {dataset_idx} due to validation error: {e}")
-                logger.debug(f"Row data: {new_row_dict}")
-
-    return rewritten_rows
-
-
-def _process_question_type(
-    config,
-    question_type: str,
-    load_subset: str,
-    save_subset: str,
-    system_prompt: str,
-    user_prompt_template: str,
-    additional_instructions: str,
-) -> None:
-    """
-    Loads, rewrites, and saves a specific type of questions.
-
-    Args:
-        config: The main configuration dictionary.
-        question_type: A string describing the question type for logging (e.g., "single-hop").
-        load_subset: The dataset subset to load questions from.
-        save_subset: The dataset subset to save rewritten questions to.
-        system_prompt: The system prompt for the rewriting model.
-        user_prompt_template: The user prompt template for the rewriting model.
-        additional_instructions: Instructions for the rewriting model.
-    """
-    try:
-        logger.info(f"Processing {question_type} questions...")
-        try:  # skipping question rewriting if subset not found
-            dataset = custom_load_dataset(config=config, subset=load_subset)
-        except Exception as e:
-            if "not found" in str(e).lower():
-                logger.warning(f"Subset '{load_subset}' not found. Skipping {question_type} question rewriting.")
-                return
-            else:
-                raise e
-
-        if not dataset or len(dataset) == 0:
-            logger.warning(f"No {question_type} questions found or dataset is empty.")
-            return
-
-        calls, indices = _build_question_rewriting_calls(
-            dataset, system_prompt, user_prompt_template, additional_instructions
-        )
-
-        if not calls:
-            logger.warning(f"No valid {question_type} questions to rewrite.")
-            return
-
-        responses = run_inference(config=config, step_name="question_rewriting", inference_calls=calls)
-        rewritten_rows = _process_question_rewriting_responses(responses, indices, dataset)
-
-        if not rewritten_rows:
-            logger.warning(f"No {question_type} questions were successfully rewritten.")
-            return
-
-        rewritten_ds = Dataset.from_list(rewritten_rows)
-        custom_save_dataset(
-            dataset=rewritten_ds, config=config, subset=save_subset, push_to_hub=config.hf_configuration.push_to_hub
-        )
-        logger.success(f"Saved {len(rewritten_rows)} rewritten {question_type} questions.")
-
-    except Exception as e:
-        logger.error(f"Error processing {question_type} questions: {e}")
+                rewritten = RewriteResponse.model_validate(decode_response_json(raw), strict=True)
+            except (ValidationError, ValueError):
+                raise ValueError("Invalid rewriting response: expected JSON question and rationale") from None
+            rows.append({
+                **row,
+                "original_question": row["question"],
+                "question": rewritten.question,
+                "question_rewriting_model": model,
+                "question_rewriting_rationale": rewritten.rationale,
+                "raw_question_rewriting_response": raw,
+            })
+    return rows
 
 
 def run(config) -> None:
-    """
-    Main entry point for the question_rewriting pipeline stage.
-
-    This stage:
-    1. Loads single-hop and multi-hop question datasets
-    2. Sends each question to an LLM for question_rewriting
-    3. Parses the rewritten questions
-    4. Saves new datasets with rewritten questions
-    """
+    stage = config.pipeline.question_rewriting
     with log_stage("question_rewriting"):
-        stage_cfg = config.pipeline.question_rewriting
-        if not stage_cfg.run:
-            logger.info("question_rewriting stage is disabled. Skipping.")
-            return
-
-        logger.info("Starting question question_rewriting stage...")
-
-    # Get prompts from configuration
-    system_prompt = stage_cfg.question_rewriting_system_prompt
-    user_prompt_template = stage_cfg.question_rewriting_user_prompt
-    additional_instructions = stage_cfg.additional_instructions
-
-    question_types_to_process = {
-        "single-hop": ("single_hop_questions", "single_hop_questions_rewritten"),
-        "multi-hop": ("multi_hop_questions", "multi_hop_questions_rewritten"),
-    }
-
-    for question_type, (load_subset, save_subset) in question_types_to_process.items():
-        _process_question_type(
-            config=config,
-            question_type=question_type,
-            load_subset=load_subset,
-            save_subset=save_subset,
-            system_prompt=system_prompt,
-            user_prompt_template=user_prompt_template,
-            additional_instructions=additional_instructions,
-        )
-
-    logger.success("Question question_rewriting stage completed")
+        documents = build_document_lookup(custom_load_dataset(config=config, subset="chunked"))
+        completed = 0
+        for generation, subset in QUESTION_SUBSETS.items():
+            try:
+                dataset = custom_load_dataset(config=config, subset=subset)
+            except MissingSubsetError:
+                if getattr(config.pipeline, generation).run:
+                    raise
+                continue
+            if not len(dataset):
+                raise ValueError(f"Cannot rewrite empty subset '{subset}'")
+            calls = _build_question_rewriting_calls(dataset, stage, documents)
+            responses = run_inference(config, "question_rewriting", calls)
+            rows = _process_question_rewriting_responses(responses, dataset)
+            rewritten = question_dataset(rows)
+            custom_save_dataset(
+                rewritten, config, subset=f"{subset}_rewritten", push_to_hub=config.hf_configuration.push_to_hub
+            )
+            completed += 1
+        if not completed:
+            raise ValueError("No question subsets found for rewriting")

@@ -1,41 +1,19 @@
-# Custom Prompts Demo
+# Custom generation prompts
 
-This example demonstrates how to customize question generation using your own system prompts.
-
-## Key Feature
-
-**Custom System Prompts** - Override the default question generation behavior with domain-specific prompts.
-
-## What's Included
-
-- `custom_prompts/single_hop_system_prompt.md` - Kid-friendly question generator
-- `custom_prompts/multi_hop_system_prompt.md` - Multi-hop reasoning for children
-- `data/` - Sample children's book PDFs
-
-## How to Run
+The recipe loads system prompts from `custom_prompts/` and uses the included policy documents. Set endpoint variables from [the examples guide](../README.md), then run:
 
 ```bash
-# Set your OpenRouter API key
-export OPENROUTER_API_KEY=sk-xxxxx
-
-# Run the pipeline
 yourbench run example/custom_prompts_demo/config.yaml
 ```
 
-## Customization
-
-To create your own custom prompts:
-
-1. Copy a prompt template from `example/prompts/`
-2. Modify the role, objectives, and quality criteria
-3. Reference your prompt in the config:
+Prompt paths resolve relative to the YAML file. For example:
 
 ```yaml
 pipeline:
   single_hop_question_generation:
-    single_hop_system_prompt: path/to/your/prompt.md
+    single_hop_system_prompt: ./custom_prompts/single_shot_system_prompt.md
 ```
 
-## See Also
+Keep the output contract when customizing prompts: return one JSON array matching the supplied schema, with verbatim source citations. The framework appends the selected schema's JSON Schema to guide the response. Prefer `additional_instructions` for small tone or topic changes; replacing a system prompt gives you responsibility for grounding and quality instructions.
 
-- `example/prompts/` - Reusable prompt templates for different domains
+See [shared templates](../prompts/) and [custom schemas](../../docs/CUSTOM_SCHEMAS.md).

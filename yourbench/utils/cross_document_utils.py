@@ -1,7 +1,9 @@
 """Cross-document dataset utilities for multi-document question generation."""
 
+import json
 import math
 import random
+import hashlib
 from typing import Any, Set, List, TypeVar, Sequence
 
 from loguru import logger
@@ -136,35 +138,28 @@ def create_cross_document_dataset(dataset: Dataset, stage_cfg: dict[str, Any]) -
 
     min_docs, max_docs = num_docs_range
 
-    # Check for required column
-    if "multihop_chunks" not in dataset.column_names:
-        logger.warning("Dataset is missing 'multihop_chunks'. Cross-document generation aborted.")
-        return Dataset.from_list([])
-
-    # Extract documents with valid multihop_chunks
+    # Cross-document reasoning only needs evidence from each document, not
+    # an existing within-document multi-hop group.
     docs = []
     for idx, row in enumerate(dataset):
-        multihop_chunks = row.get("multihop_chunks", [])
-        if isinstance(multihop_chunks, list) and multihop_chunks:
+        valid_chunks = [
+            chunk
+            for chunk in (row.get("multihop_chunks") or [])
+            if isinstance(chunk, dict) and chunk.get("chunk_ids") and chunk.get("chunks_text")
+        ]
+        if not valid_chunks:
             valid_chunks = [
-                chunk
-                for chunk in multihop_chunks
-                if isinstance(chunk, dict) and all(key in chunk for key in ("chunk_ids", "chunks_text"))
+                {"chunk_ids": [chunk["chunk_id"]], "chunks_text": [chunk["chunk_text"]]}
+                for chunk in (row.get("chunks") or [])
+                if chunk.get("chunk_id") and chunk.get("chunk_text")
             ]
-            if valid_chunks:
-                # Create more readable and collision-resistant document IDs
-                doc_id = row.get("document_id", f"doc_{idx}")
-                # Clean doc_id for safe ID generation
-                clean_doc_id = "".join(c for c in str(doc_id) if c.isalnum() or c in "_-")
-                if not clean_doc_id:
-                    clean_doc_id = f"doc_{idx}"
-
-                docs.append({
-                    "document_id": clean_doc_id,
-                    "original_index": idx,
-                    "document_summary": row.get("document_summary", ""),
-                    "multihop_chunks": valid_chunks,
-                })
+        if valid_chunks:
+            docs.append({
+                "document_id": row.get("document_id", f"doc_{idx}"),
+                "original_index": idx,
+                "document_summary": row.get("document_summary", ""),
+                "multihop_chunks": valid_chunks,
+            })
 
     if len(docs) < min_docs:
         logger.warning(f"Found only {len(docs)} document(s) with valid 'multihop_chunks'. Need at least {min_docs}.")
@@ -222,6 +217,7 @@ def create_cross_document_dataset(dataset: Dataset, stage_cfg: dict[str, Any]) -
         # Process each combination
         for doc_group in doc_combinations:
             sampled_chunks_from_group = []
+            sources = []
             doc_ids_for_tracing = []
 
             # Sample chunks from each document in the group
@@ -239,6 +235,11 @@ def create_cross_document_dataset(dataset: Dataset, stage_cfg: dict[str, Any]) -
                     sampled_chunks = rng.sample(doc["multihop_chunks"], num_chunks_to_sample)
 
                 sampled_chunks_from_group.extend(sampled_chunks)
+                sources.extend(
+                    {"document_id": doc["document_id"], "chunk_id": cid}
+                    for chunk in sampled_chunks
+                    for cid in chunk["chunk_ids"]
+                )
 
             # Validation: ensure we have chunks from the expected number of documents
             # (This addresses the original validation mismatch issue)
@@ -286,10 +287,15 @@ def create_cross_document_dataset(dataset: Dataset, stage_cfg: dict[str, Any]) -
 
             # Create readable and collision-resistant ID
             doc_ids_sorted = sorted(doc_ids_for_tracing)
-            doc_ids_str = "_".join(doc_ids_sorted)
-
-            # Create a human-readable, deterministic ID using number of documents, sorted document IDs, and chunks per document
-            cross_doc_id = f"cross_{len(doc_group)}docs_{doc_ids_str}_chunks{chunks_per_document}"
+            # Hash structured identity: delimiter-joined IDs can collide, and
+            # different evidence selections must not share a provenance key.
+            identity = json.dumps(
+                {"document_ids": doc_ids_sorted, "sources": sources},
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            cross_doc_id = f"cross_{hashlib.sha256(identity.encode()).hexdigest()}"
 
             # Add comprehensive metadata for traceability
             metadata = {
@@ -306,6 +312,7 @@ def create_cross_document_dataset(dataset: Dataset, stage_cfg: dict[str, Any]) -
                 "document_summary": combined_summary,
                 "chunks": [],  # keep consistent with original schema
                 "multihop_chunks": [combined_multihop_chunk],
+                "sources": sources,
                 "cross_document_metadata": metadata,  # add traceability
             })
 

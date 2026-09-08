@@ -1,20 +1,25 @@
 hf_configuration:
   hf_dataset_name: harry-potter-quizz
+  push_to_hub: false
+  upload_card: false
   private: true
-
+  local_saving: true
+  local_dataset_dir: ./output/datasets
+  export_jsonl: true
+  jsonl_export_dir: ./output/jsonl
 model_list:
-  - model_name: openai/gpt-oss-120b
-    base_url: https://openrouter.ai/api/v1
-    api_key: $OPENROUTER_API_KEY
-    max_concurrent_requests: 8
-
+- model_name: $YOURBENCH_MODEL
+  base_url: $YOURBENCH_BASE_URL
+  api_key: $YOURBENCH_API_KEY
+  max_concurrent_requests: 4
 pipeline:
   ingestion:
-    source_documents_dir: data
-    output_dir: processed
-  summarization:
+    source_documents_dir: ../sample_documents
+    output_dir: ./output/processed
+  summarization: null
   chunking:
-    l_max_tokens: 1024      # Maximum chunk size
-    token_overlap: 256      # Overlap between chunks
+    l_max_tokens: 1024
+    token_overlap: 256
   single_hop_question_generation:
-    question_mode: multi-choice # or open-ended
+    question_mode: multi-choice
+  prepare_lighteval: {}
