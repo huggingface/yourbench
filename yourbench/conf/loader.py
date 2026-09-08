@@ -18,19 +18,10 @@ from yourbench.conf.schema import (
     ConfigValidationError,
 )
 from yourbench.conf.prompts import DEFAULT_PROMPTS, load_prompt
+from yourbench.pipeline.registry import STAGES
 
 
-STAGE_ORDER = [
-    "ingestion",
-    "summarization",
-    "chunking",
-    "single_hop_question_generation",
-    "multi_hop_question_generation",
-    "cross_document_question_generation",
-    "question_rewriting",
-    "prepare_lighteval",
-    "citation_score_filtering",
-]
+STAGE_ORDER = list(STAGES)
 
 # Prompt field paths: (config path tuple, default prompt key)
 PROMPT_FIELDS = [
@@ -77,22 +68,82 @@ def load_config(yaml_path: str | Path) -> YourbenchConfig:
     with open(yaml_path) as f:
         data = yaml.safe_load(f) or {}
 
-    # Transform the data
-    data = _handle_legacy_fields(data)
-    data = expand_env_recursive(data)  # Expand $VAR syntax
-    data = _mark_enabled_stages(data)
-    data = _auto_load_openai_from_env(data)
+    return resolve_config(data, base_dir=yaml_path.resolve().parent)
 
-    # Validate with Pydantic
+
+def _expand_execution_values(data, field=""):
+    """Natural-language content is literal, never a credential interpolation surface."""
+    if field == "additional_instructions" or "prompt" in field:
+        if isinstance(data, str) and data.startswith("file:"):
+            return expand_env_recursive(data)
+        return data
+    if isinstance(data, dict):
+        return {key: _expand_execution_values(value, key) for key, value in data.items()}
+    if isinstance(data, list):
+        return [_expand_execution_values(value, field) for value in data]
+    return expand_env_recursive(data)
+
+
+def resolve_config(data: dict[str, Any], base_dir: str | Path | None = None) -> YourbenchConfig:
+    """Resolve YAML or generated configuration through the same validation path.
+
+    Relative file paths are relative to the configuration file, or base_dir.
+    """
+    from copy import deepcopy
+
+    if not isinstance(data, dict):
+        raise ConfigValidationError("Configuration must be a mapping")
+    data = _handle_legacy_fields(deepcopy(data))
+    data = _auto_load_openai_from_env(data)
+    data = _expand_execution_values(data)
+    data = _mark_enabled_stages(data)
     try:
         config = YourbenchConfig.model_validate(data)
-    except Exception as e:
-        raise ConfigValidationError(f"Config validation failed: {e}") from e
+    except Exception as exc:
+        # Pydantic input values can contain credentials. Exclude them from errors.
+        from pydantic import ValidationError
 
-    # Post-processing (needs access to the validated config)
-    _load_prompts(config)
+        if isinstance(exc, ValidationError):
+            details = "; ".join(
+                f"{'.'.join(map(str, e['loc']))}: {e['msg']}"
+                for e in exc.errors(include_input=False, include_url=False)
+            )
+            raise ConfigValidationError(details) from None
+        raise ConfigValidationError("Invalid configuration") from None
+
+    from yourbench.utils.env import validate_env_expanded
+
+    for model in config.model_list:
+        for field in ("api_key", "base_url", "model_name"):
+            value = getattr(model, field)
+            if value:
+                validate_env_expanded(value, f"model_list.{field}")
+
+    base = Path(base_dir or Path.cwd()).resolve()
+    for obj, fields in (
+        (config.hf_configuration, ("local_dataset_dir", "jsonl_export_dir")),
+        (config.pipeline.ingestion, ("source_documents_dir", "output_dir")),
+    ):
+        for field in fields:
+            value = getattr(obj, field)
+            if value:
+                setattr(obj, field, str((base / Path(value).expanduser()).resolve()))
+    for stage in STAGE_ORDER:
+        cfg = getattr(config.pipeline, stage)
+        if getattr(cfg, "question_schema", None):
+            cfg.question_schema = str((base / Path(cfg.question_schema).expanduser()).resolve())
+    _load_prompts(config, base)
     _assign_model_roles(config)
-
+    if config.pipeline.question_rewriting.run:
+        export = config.pipeline.prepare_lighteval
+        for field, subset in (
+            ("single_hop_subset", "single_hop_questions"),
+            ("multi_hop_subset", "multi_hop_questions"),
+            ("cross_doc_subset", "cross_document_questions"),
+        ):
+            stage_name = subset.replace("_questions", "_question_generation")
+            if getattr(config.pipeline, stage_name).run and field not in export.model_fields_set:
+                setattr(export, field, subset + "_rewritten")
     return config
 
 
@@ -133,16 +184,16 @@ def _auto_load_openai_from_env(data: dict[str, Any]) -> dict[str, Any]:
         return data
 
     api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
+    if not api_key or not os.getenv("OPENAI_MODEL"):
         return data
 
     openai_model = {
-        "model_name": os.getenv("OPENAI_MODEL", "gpt-4"),
+        "model_name": os.environ["OPENAI_MODEL"],
         "api_key": "$OPENAI_API_KEY",
         "max_concurrent_requests": 128,
     }
 
-    base_url = os.getenv("OPENAI_BASE_URL")
+    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     if base_url:
         openai_model["base_url"] = base_url
 
@@ -151,36 +202,15 @@ def _auto_load_openai_from_env(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-def _load_prompts(config: YourbenchConfig) -> None:
-    """Load prompt content from file paths or package defaults."""
+def _load_prompts(config: YourbenchConfig, base_dir: Path | None = None) -> None:
+    """Load prompts once, failing explicitly for missing user files."""
     for path_tuple, default_key in PROMPT_FIELDS:
-        try:
-            # Navigate to the parent object
-            obj = config
-            for key in path_tuple[:-1]:
-                obj = getattr(obj, key)
-
-            field = path_tuple[-1]
-            current_value = getattr(obj, field, "")
-            default_path = DEFAULT_PROMPTS.get(default_key, "")
-
-            if current_value:
-                # User provided a value - load from path or use as-is
-                new_value = load_prompt(str(current_value), default_path)
-            elif default_path:
-                # No value - load default prompt
-                new_value = load_prompt("", default_path)
-            else:
-                continue
-
-            # Set the value on the Pydantic model
-            setattr(obj, field, new_value)
-        except AttributeError:
-            # Stage not configured - this is expected for disabled stages
-            pass
-        except Exception as exc:
-            # Unexpected error - log at error level since prompts are critical
-            logger.error(f"Failed to load prompt for {'.'.join(path_tuple)}: {exc}")
+        obj = config
+        for key in path_tuple[:-1]:
+            obj = getattr(obj, key)
+        field = path_tuple[-1]
+        value = getattr(obj, field, "")
+        setattr(obj, field, load_prompt(value, DEFAULT_PROMPTS.get(default_key, ""), base_dir=base_dir))
 
 
 def _assign_model_roles(config: YourbenchConfig) -> None:

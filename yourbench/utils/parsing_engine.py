@@ -1,13 +1,15 @@
 import re
 import json
 import random
-import string
 import hashlib
-from typing import Any, Optional
+from typing import Any
+from dataclasses import fields
 
 from loguru import logger
+from pydantic import ValidationError
 
-from yourbench.utils.question_models import QuestionRow, validate_list, force_int_in_range
+from yourbench.utils.schema_loader import load_schema_from_spec
+from yourbench.utils.question_models import QuestionRow
 
 
 # Field alias mapping for custom schemas
@@ -44,48 +46,6 @@ def _normalize_pair_fields(pair: dict) -> dict:
     if "estimated_difficulty" in normalized and isinstance(normalized["estimated_difficulty"], str):
         normalized["estimated_difficulty"] = DIFFICULTY_MAPPINGS.get(normalized["estimated_difficulty"].lower(), 5)
     return normalized
-
-
-# Standard fields that are part of QuestionRow - any field NOT in this set is a custom schema field
-STANDARD_FIELDS: set[str] = {
-    "question",
-    "answer",
-    "self_answer",
-    "thought_process",
-    "reasoning",
-    "explanation",
-    "rationale",
-    "thinking",
-    "question_type",
-    "self_assessed_question_type",
-    "estimated_difficulty",
-    "difficulty",
-    "complexity",
-    "citations",
-    "choices",
-    "question_mode",
-    "document_id",
-    "chunk_id",
-    "source_chunk_ids",
-    "generating_model",
-    "raw_response",
-    "additional_instructions",
-    "original_question",
-    "question_rewriting_model",
-    "question_rewriting_rationale",
-    "raw_question_rewriting_response",
-}
-
-
-def _extract_custom_fields(pair: dict) -> dict:
-    """Extract custom schema fields that are not part of the standard QuestionRow."""
-    return {key: value for key, value in pair.items() if key not in STANDARD_FIELDS}
-
-
-def _has_difficulty_field(pair: dict) -> bool:
-    """Check if the pair has any difficulty-related field."""
-    difficulty_fields = {"estimated_difficulty", "difficulty", "complexity"}
-    return bool(difficulty_fields & pair.keys())
 
 
 def _is_valid_question_list(items: list) -> bool:
@@ -293,285 +253,106 @@ def parse_qa_pairs_from_response(raw_response: str) -> list[dict[str, Any]]:
 
 # QA response parsing utils
 
-OPEN_ENDED_TYPES = {
-    "analytical",
-    "application-based",
-    "clarification",
-    "counterfactual",
-    "conceptual",
-    "true-false",
-    "factual",
-    "open-ended",
-    "false-premise",
-    "edge-case",
-}
 
-MULTI_CHOICE_TYPES = {
-    "analytical",
-    "application-based",
-    "clarification",
-    "counterfactual",
-    "conceptual",
-    "true-false",
-    "factual",
-    "false-premise",
-    "edge-case",
-}
+def _config_value(config, name, default=None):
+    return config.get(name, default) if isinstance(config, dict) else getattr(config, name, default)
 
 
-def normalize_open_ended(pair: dict[str, Any]) -> Optional[dict[str, Any]]:
-    """
-    Ensures open-ended questions are valid.
-    Returns None if the entry should be skipped.
-    """
-    pair = dict(pair)  # defensive copy
-    mode = pair.get("question_mode", "").strip().lower()
-    q_type = pair.get("question_type", "").strip().lower()
-
-    if mode != "open-ended":
-        return pair
-
-    if q_type not in OPEN_ENDED_TYPES:
-        logger.warning(f"Inconsistent open-ended question_type: '{q_type}'")
-        return pair
-
-    # No choices for open-ended
-    pair["choices"] = []
-
-    answer = pair.get("answer", "").strip()
-    if len(answer) == 1 and answer.upper() in {"A", "B", "C", "D"}:
-        # Misclassified multiple choice
-        return None
-
-    return pair
-
-
-def normalize_multi_choice(pair: dict[str, Any]) -> Optional[dict[str, Any]]:
-    """
-    Ensures multiple-choice questions are valid.
-    Returns None if the entry should be skipped.
-    """
-    pair = dict(pair)
-    mode = pair.get("question_mode", "").strip().lower()
-    q_type = pair.get("question_type", "").strip().lower()
-
-    if mode != "multi-choice":
-        return pair
-
-    if q_type not in MULTI_CHOICE_TYPES:
-        logger.warning(f"Inconsistent multiple-choice question_type: '{q_type}'")
-        return pair
-
-    choices = validate_list(pair.get("choices", []))
-    if len(choices) != 4:
-        logger.warning("MCQ must have exactly 4 choices.")
-        return None
-
-    pair["choices"] = choices
-    return pair
+def _parse_responses(responses, index_map, stage_cfg, *, multi_hop=False):
+    """Validate model payloads once and attach authoritative execution metadata."""
+    mode = (_config_value(stage_cfg, "question_mode", "open-ended") or "open-ended").strip().lower() or "open-ended"
+    schema_spec = _config_value(stage_cfg, "question_schema")
+    schema = load_schema_from_spec(schema_spec, mode)
+    rows = []
+    for model, replies in responses.items():
+        if len(replies) != len(index_map):
+            raise ValueError(f"Response count for {model}: {len(replies)}; expected {len(index_map)}")
+        for index, raw in enumerate(replies):
+            for candidate in parse_qa_pairs_from_response(raw):
+                if not isinstance(candidate, dict):
+                    continue
+                try:
+                    # Default legacy responses may omit descriptive metadata; the
+                    # actual question, answer and MCQ constraints remain required.
+                    payload = dict(candidate)
+                    if not schema_spec:
+                        payload = _normalize_pair_fields(payload)
+                        for key, default in {
+                            "thought_process": "",
+                            "question_type": "factual",
+                            "estimated_difficulty": 5,
+                            "citations": [],
+                        }.items():
+                            payload.setdefault(key, default)
+                    validated = schema.model_validate(payload).model_dump(mode="json")
+                    if not str(validated.get("question", "")).strip():
+                        raise ValueError("Question must be nonempty")
+                    if not str(validated.get("answer", "")).strip():
+                        raise ValueError("Answer must be nonempty")
+                    pair = _normalize_pair_fields(validated)
+                    if mode == "multi-choice":
+                        pair = shuffle_mcq(pair)
+                    pair["question_mode"] = mode
+                    _, document_id, chunk_ids = index_map[index][:3]
+                    factory = QuestionRow.from_multi_hop if multi_hop else QuestionRow.from_single_hop
+                    record = factory(
+                        pair,
+                        chunk_ids,
+                        document_id,
+                        model,
+                        raw,
+                        _config_value(stage_cfg, "additional_instructions", ""),
+                    ).to_dict(format="multi-hop" if multi_hop else "single-hop")
+                    # Preserve schema fields verbatim, including aliases and nested
+                    # structures, while execution metadata cannot be overwritten.
+                    reserved = {field.name for field in fields(QuestionRow)}
+                    record = {**{key: value for key, value in validated.items() if key not in reserved}, **record}
+                    record["answer"] = pair["answer"]
+                    if mode == "multi-choice":
+                        record["choices"] = pair["choices"]
+                    record["question_data"] = validated
+                    record["sources"] = [
+                        {"document_id": document_id, "chunk_id": cid}
+                        for cid in (chunk_ids if multi_hop else [chunk_ids])
+                    ]
+                    rows.append(record)
+                except (ValidationError, ValueError, TypeError) as error:
+                    logger.warning(f"Rejected question from {model} at response {index}: {error}")
+    return rows
 
 
 def parse_single_hop_responses(responses, index_map, stage_cfg):
-    rows = []
-    question_mode = (
-        str(
-            getattr(stage_cfg, "question_mode", "open-ended")
-            if hasattr(stage_cfg, "question_mode")
-            else stage_cfg.get("question_mode", "open-ended")
-            if isinstance(stage_cfg, dict)
-            else "open-ended"
-        )
-        .strip()
-        .lower()
-    )
-
-    for model, replies in responses.items():
-        if len(replies) != len(index_map):
-            logger.error(f"Mismatch: model '{model}' replies={len(replies)}, expected={len(index_map)}")
-            continue
-
-        for i, reply in enumerate(replies):
-            parsed_qa_pairs = parse_qa_pairs_from_response(reply)
-            if not parsed_qa_pairs:
-                logger.warning(f"No parseable QA pairs at index {i}.")
-                continue
-
-            for pair in parsed_qa_pairs:
-                if not isinstance(pair, dict):
-                    logger.debug(f"Skipping non-dict item in single-shot response: {type(pair)}")
-                    continue
-                try:
-                    pair = shuffle_mcq(pair)
-                    pair = _normalize_pair_fields(pair)
-                    pair["question_mode"] = question_mode
-
-                    if question_mode == "open-ended":
-                        pair = normalize_open_ended(pair)
-                        if pair is None:
-                            continue
-                        choices = []
-                    elif question_mode == "multi-choice":
-                        pair = normalize_multi_choice(pair)
-                        if pair is None:
-                            continue
-                        choices = pair["choices"]
-                    else:
-                        logger.warning(f"Unsupported question_mode: {question_mode}")
-                        continue
-
-                    citations = validate_list(pair.get("citations", []))
-
-                    # Build standard QuestionRow output
-                    base_row = QuestionRow(
-                        chunk_id=index_map[i][2],
-                        source_chunk_ids=None,
-                        document_id=index_map[i][1],
-                        additional_instructions=stage_cfg.additional_instructions,
-                        question=str(pair.get("question", "")).strip(),
-                        self_answer=str(pair.get("answer", "")).strip(),
-                        choices=choices,
-                        estimated_difficulty=force_int_in_range(pair.get("estimated_difficulty", 5), 1, 10),
-                        self_assessed_question_type=str(pair.get("question_type", "")).strip(),
-                        question_mode=pair["question_mode"],
-                        generating_model=model,
-                        thought_process=str(pair.get("thought_process", "")),
-                        raw_response=reply,
-                        citations=citations,
-                    ).to_dict(format="single-hop")
-                    # Remove estimated_difficulty if not explicitly provided in LLM response
-                    if not _has_difficulty_field(pair):
-                        base_row.pop("estimated_difficulty", None)
-                    # Merge custom schema fields (preserves fields like probing_follow_ups, etc.)
-                    custom_fields = _extract_custom_fields(pair)
-                    if custom_fields:
-                        base_row.update(custom_fields)
-                    rows.append(base_row)
-                except Exception as e:
-                    logger.error(f"Error parsing QA pair at index {i}: {e}")
-                    continue
-
-    return rows
+    return _parse_responses(responses, index_map, stage_cfg)
 
 
 def parse_multi_hop_responses(responses, index_map, stage_cfg):
-    rows = []
-    question_mode = (
-        str(
-            getattr(stage_cfg, "question_mode", "open-ended")
-            if hasattr(stage_cfg, "question_mode")
-            else stage_cfg.get("question_mode", "open-ended")
-            if isinstance(stage_cfg, dict)
-            else "open-ended"
-        )
-        .strip()
-        .lower()
-    )
-
-    for model, replies in responses.items():
-        for i, raw in enumerate(replies):
-            parsed = parse_qa_pairs_from_response(raw)
-            for pair in parsed:
-                if not isinstance(pair, dict):
-                    logger.debug(f"Skipping non-dict item in multi-hop response: {type(pair)}")
-                    continue
-                try:
-                    pair = shuffle_mcq(pair)
-                    pair = _normalize_pair_fields(pair)
-                    pair["question_mode"] = question_mode
-
-                    if question_mode == "open-ended":
-                        pair = normalize_open_ended(pair)
-                        if pair is None:
-                            continue
-                        choices = []
-                    elif question_mode == "multi-choice":
-                        pair = normalize_multi_choice(pair)
-                        if pair is None:
-                            continue
-                        choices = pair["choices"]
-                    else:
-                        logger.warning(f"Unsupported question_mode: {question_mode}")
-                        continue
-
-                    citations = validate_list(pair.get("citations", []))
-
-                    # Build standard QuestionRow output
-                    base_row = QuestionRow(
-                        chunk_id=None,
-                        source_chunk_ids=index_map[i][2],
-                        document_id=index_map[i][1],
-                        additional_instructions=stage_cfg.additional_instructions,
-                        question=str(pair.get("question", "")).strip(),
-                        self_answer=str(pair.get("answer", "")).strip(),
-                        choices=choices,
-                        estimated_difficulty=force_int_in_range(pair.get("estimated_difficulty", 5), 1, 10),
-                        self_assessed_question_type=str(pair.get("question_type", "")).strip(),
-                        question_mode=pair["question_mode"],
-                        generating_model=model,
-                        thought_process=str(pair.get("thought_process", "")),
-                        raw_response=raw,
-                        citations=citations,
-                    ).to_dict(format="multi-hop")
-                    # Remove estimated_difficulty if not explicitly provided in LLM response
-                    if not _has_difficulty_field(pair):
-                        base_row.pop("estimated_difficulty", None)
-                    # Merge custom schema fields (preserves fields like probing_follow_ups, etc.)
-                    custom_fields = _extract_custom_fields(pair)
-                    if custom_fields:
-                        base_row.update(custom_fields)
-                    rows.append(base_row)
-                except Exception as e:
-                    logger.warning(f"Parse error in multi-hop QA for doc {index_map[i][1]}: {e}")
-                    continue
-
-    return rows
+    return _parse_responses(responses, index_map, stage_cfg, multi_hop=True)
 
 
 def shuffle_mcq(question_dict: dict) -> dict:
-    """
-    Shuffles MCQ choices randomly and ensures the correct answer is placed under a random label A-D.
-    The final choices are labeled A., B., C., D. in order, but the correct answer may be under any of them.
-    """
-    labeled_choices = question_dict.get("choices", [])
-    answer_letter = question_dict.get("answer", "").strip().upper()
-
-    if not labeled_choices or not answer_letter:
-        return question_dict
-
-    # Extract raw text (removing A., B., etc.)
-    raw_choices = [choice[3:].strip() for choice in labeled_choices]
-    answer_index = ord(answer_letter) - ord("A")
-    answer_choice_text = raw_choices[answer_index]
-
-    # Shuffle the raw choices randomly
-    seed_input = repr((raw_choices, answer_letter))
-    seed = int(hashlib.sha256(seed_input.encode()).hexdigest(), 16)
-
-    rng = random.Random(seed)
-    rng.shuffle(raw_choices)
-
-    # Find new index of the correct choice
-    new_correct_index = raw_choices.index(answer_choice_text)
-    new_answer_letter = chr(ord("A") + new_correct_index)
-
-    # Re-label as A., B., C., D.
-    labeled_shuffled = [f"({chr(ord('A') + i)}) {text}" for i, text in enumerate(raw_choices)]
-
-    # Update the question dict
-    question_dict["choices"] = labeled_shuffled
-    question_dict["answer"] = new_answer_letter
-
-    return question_dict
+    """Shuffle option indices deterministically, preserving duplicate option identity."""
+    result = dict(question_dict)
+    choices = result.get("choices", [])
+    answer = str(result.get("answer", "")).strip().upper()
+    if not isinstance(choices, list) or not 2 <= len(choices) <= 26:
+        raise ValueError("Multiple-choice questions require 2 to 26 choices")
+    if len(answer) != 1 or not "A" <= answer <= "Z" or ord(answer) - ord("A") >= len(choices):
+        raise ValueError("Multiple-choice answer must reference an existing choice")
+    if not all(isinstance(choice, str) for choice in choices):
+        raise ValueError("Choices must be strings")
+    raw_choices = [re.sub(r"^\s*(?:\([A-Z]\)|[A-Z][.)])\s*", "", choice) for choice in choices]
+    order = list(range(len(choices)))
+    seed = int(hashlib.sha256(repr((raw_choices, answer)).encode()).hexdigest(), 16)
+    random.Random(seed).shuffle(order)
+    result["choices"] = [f"({chr(65 + i)}) {raw_choices[source]}" for i, source in enumerate(order)]
+    result["answer"] = chr(65 + order.index(ord(answer) - 65))
+    return result
 
 
 def _remove_duplicate_questions(rows: list[dict]) -> list[dict]:
     """
-    Removes duplicate question entries based on an enhanced normalized question text.
-    Normalization includes:
-        - Lowercasing
-        - Removing punctuation
-        - Removing digits
-        - Stripping and collapsing whitespace
+    Removes duplicate question entries based on case-folded question text.
+    Whitespace is collapsed; meaningful numbers and punctuation are preserved
     The original question format is preserved in the output.
     """
     seen_questions = set()
@@ -584,10 +365,7 @@ def _remove_duplicate_questions(rows: list[dict]) -> list[dict]:
             continue
 
         # Normalize for deduplication
-        norm_question = question.lower()
-        norm_question = re.sub(rf"[{re.escape(string.punctuation)}]", "", norm_question)
-        norm_question = re.sub(r"\d+", "", norm_question)
-        norm_question = " ".join(norm_question.split())
+        norm_question = " ".join(question.casefold().split())
 
         if norm_question not in seen_questions:
             seen_questions.add(norm_question)

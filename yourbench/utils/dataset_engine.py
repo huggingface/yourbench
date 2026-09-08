@@ -4,7 +4,6 @@ import shutil
 import tempfile
 from typing import Any, TypeVar
 from pathlib import Path
-from contextlib import suppress
 from dataclasses import dataclass
 
 from loguru import logger
@@ -77,7 +76,7 @@ def _extract_settings(config) -> HFSettings:
 
     org_raw = get_val("hf_organization", "")
     token = get_val("hf_token", "") or os.getenv("HF_TOKEN")
-    organization = _resolve_organization(org_raw, token)
+    organization = _resolve_organization(org_raw, token) if get_val("push_to_hub", True) else (org_raw or None)
 
     local_raw = get_val("local_dataset_dir")
     local_dir = Path(local_raw).expanduser().resolve() if local_raw else None
@@ -149,17 +148,14 @@ def _load_local(path: Path, subset: str | None) -> Dataset:
         return dataset
 
     if not isinstance(dataset, DatasetDict):
-        # If subset is requested but dataset is not a DatasetDict,
-        # return the dataset with a warning (assuming it's the one they want)
-        logger.warning(f"Subset '{subset}' requested but dataset is not a DatasetDict. Returning the dataset anyway.")
-        return dataset
+        raise FileNotFoundError(f"Named subset '{subset}' requires a DatasetDict at {path}")
 
     if subset in dataset:
         return dataset[subset]
 
     # Provide a helpful error message showing available subsets
     available_subsets = list(dataset.keys())
-    raise ConfigurationError(f"Subset '{subset}' not found in local dataset. Available subsets: {available_subsets}")
+    raise FileNotFoundError(f"Subset '{subset}' not found in local dataset. Available subsets: {available_subsets}")
 
 
 def _load_hub(repo_id: str, subset: str | None, token: str | None) -> Dataset:
@@ -173,7 +169,7 @@ def _load_hub(repo_id: str, subset: str | None, token: str | None) -> Dataset:
         return dataset
     except ValueError as e:
         if "BuilderConfig" in str(e) and "not found" in str(e):
-            raise ConfigurationError(f"Subset '{subset}' not found on Hub") from e
+            raise FileNotFoundError(f"Subset '{subset}' not found on Hub") from e
         if "split" in str(e):
             raise ConfigurationError("Split 'train' not found in dataset") from e
         raise
@@ -195,13 +191,7 @@ def _merge_datasets(
         existing = DatasetDict({"default": existing})
 
     if subset in existing and concat_if_exist:
-        try:
-            # Concatenate new data with the existing subset
-            new = concatenate_datasets([existing[subset], new])
-        except (ValueError, TypeError, KeyError) as e:
-            logger.warning(
-                f"Could not concatenate for subset '{subset}' (e.g., schema mismatch). Overwriting. Error: {e}"
-            )
+        new = concatenate_datasets([existing[subset], new])
 
     existing[subset] = new
     return existing
@@ -238,31 +228,6 @@ def _export_to_jsonl(dataset: Dataset | DatasetDict, export_dir: Path, subset: s
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         logger.success(f"Exported {len(dataset)} rows to {file_path}")
 
-        # Special handling for prepared_lighteval subset - create simplified questions_and_answers.jsonl
-        if subset == "prepared_lighteval":
-            # Also export simplified version to questions_and_answers.jsonl in current directory
-            qa_file_path = Path.cwd() / "questions_and_answers.jsonl"
-
-            logger.info(f"Creating simplified Q&A dataset at: {qa_file_path}")
-            with open(qa_file_path, "w", encoding="utf-8") as f:
-                for row in dataset:
-                    # Create a filtered row without document/summary/chunks
-                    filtered_row = {
-                        "question": row.get("question", ""),
-                        "ground_truth_answer": row.get("ground_truth_answer", ""),
-                        "question_category": row.get("question_category", ""),
-                        "kind": row.get("kind", ""),
-                        "estimated_difficulty": row.get("estimated_difficulty", 5),
-                        "citations": row.get("citations", []),
-                        "document_id": row.get("document_id", ""),
-                        "chunk_ids": row.get("chunk_ids", []),
-                        "question_generating_model": row.get("question_generating_model", ""),
-                        "choices": row.get("choices", []),
-                        "gold": row.get("gold", []),
-                    }
-                    f.write(json.dumps(filtered_row, ensure_ascii=False) + "\n")
-            logger.success(f"Created simplified questions_and_answers.jsonl with {len(dataset)} Q&A pairs")
-
     elif isinstance(dataset, DatasetDict):
         # Multiple subsets - export each to separate file
         logger.info(f"Exporting DatasetDict with {len(dataset)} subsets to JSONL")
@@ -282,27 +247,20 @@ def _export_to_jsonl(dataset: Dataset | DatasetDict, export_dir: Path, subset: s
 
 
 def custom_load_dataset(config: Any, subset: str | None = None) -> Dataset:
-    """Load dataset subset from local path or Hub. Raises errors if data missing or invalid."""
+    """Load a named local artifact, using Hub only when remote access is enabled.
+
+    Missing artifacts raise FileNotFoundError; corruption and network failures
+    propagate unchanged instead of being disguised as absent data.
+    """
     settings = _extract_settings(config)
-
-    if settings.local_dir:
-        local_dir = settings.local_dir
+    if settings.local_dir and settings.local_dir.exists() and any(settings.local_dir.iterdir()):
         try:
-            local_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            logger.warning(f"Could not ensure local dataset dir exists: {e}")
-
-        if local_dir.exists() and any(local_dir.iterdir()):
-            try:
-                return _load_local(local_dir, subset)
-            except Exception as e:
-                logger.warning(f"Failed to load local dataset '{local_dir}': {e}. Will try remote.")
-        else:
-            logger.info(f"Local dataset dir '{local_dir}' is empty; will treat this run as fresh.")
-
-    if _is_offline():
-        raise RuntimeError("Offline mode enabled but no local dataset found")
-
+            return _load_local(settings.local_dir, subset)
+        except FileNotFoundError:
+            if _is_offline() or not getattr(config.hf_configuration, "push_to_hub", True):
+                raise
+    if _is_offline() or not getattr(config.hf_configuration, "push_to_hub", True):
+        raise FileNotFoundError(f"Dataset subset '{subset}' not found locally in {settings.local_dir}")
     _validate_repo(settings)
     return _load_hub(settings.repo_id, subset, settings.token)
 
@@ -312,11 +270,14 @@ def custom_save_dataset(
     config: Any,
     subset: str | None = None,
     *,
-    save_local: bool = True,
-    push_to_hub: bool = True,
+    save_local: bool | None = None,
+    push_to_hub: bool | None = None,
 ) -> None:
     """Save dataset locally and/or push to Hub."""
     settings = _extract_settings(config)
+    hf = config.hf_configuration
+    save_local = getattr(hf, "local_saving", True) if save_local is None else save_local
+    push_to_hub = getattr(hf, "push_to_hub", True) if push_to_hub is None else push_to_hub
 
     if _is_offline():
         save_local = True
@@ -352,8 +313,11 @@ def custom_save_dataset(
 
     if push_to_hub and not _is_offline():
         if settings.concat_if_exist:
-            with suppress(Exception):
+            try:
                 existing = _load_hub(settings.repo_id, subset, settings.token)
+            except FileNotFoundError:
+                pass
+            else:
                 dataset = concatenate_datasets([existing, dataset])
                 logger.info("Concatenated with existing remote")
 

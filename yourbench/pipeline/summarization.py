@@ -42,6 +42,8 @@ def run(config) -> None:
             else:
                 final_summaries = [chunks[0] if chunks else "" for chunks in chunks_by_doc]
 
+        if any(not summary.strip() for summary in final_summaries):
+            raise ValueError("Summarization returned empty or unparseable summaries")
         # Save results
         with log_step("saving_results"):
             dataset = dataset.add_column("document_summary", final_summaries)

@@ -12,8 +12,8 @@ model_list:
 
 pipeline:
   ingestion:
-    source_documents_dir: example/local_vllm_private_data/data
-    output_dir: example/local_vllm_private_data/processed
+    source_documents_dir: ./data
+    output_dir: ./processed
   summarization:
   chunking:
   single_hop_question_generation:

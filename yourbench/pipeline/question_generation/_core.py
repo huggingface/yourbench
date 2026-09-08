@@ -14,6 +14,7 @@ from yourbench.utils.parsing_engine import (
 )
 from yourbench.utils.prompt_builder import build_system_prompt
 from yourbench.utils.logging_context import log_step, log_stage
+from yourbench.utils.question_models import question_dataset
 from yourbench.utils.cross_document_utils import create_cross_document_dataset
 from yourbench.utils.inference.inference_core import run_inference
 from yourbench.utils.inference.inference_builders import (
@@ -23,15 +24,12 @@ from yourbench.utils.inference.inference_builders import (
 
 
 def _get_system_prompt(stage_cfg: Any, mode: str, is_multi: bool = False) -> str:
-    """Get system prompt, substituting schema placeholders if custom schema is specified."""
+    """Get system prompt, rendering the selected default or custom schema."""
     prefix = "multi_hop_" if is_multi else "single_hop_"
     suffix = "_multi" if mode == "multi-choice" else ""
     template = getattr(stage_cfg, f"{prefix}system_prompt{suffix}")
 
     schema_spec = getattr(stage_cfg, "question_schema", None)
-    if not schema_spec:
-        return template
-
     schema_class = load_schema_from_spec(schema_spec, mode)
     return build_system_prompt(template, schema_class)
 
@@ -55,19 +53,12 @@ def _build_and_run_inference(
     dataset: Dataset, system_msg: dict, stage_cfg: Any, builder_func: callable, step_name: str, config
 ) -> tuple[dict, list]:
     """Common pattern: build calls, run inference, return responses + index map."""
-    sampling_cfg = (
-        get_sampling_cfg(stage_cfg) if hasattr(builder_func, "__name__") and "single" in builder_func.__name__ else {}
-    )
-
-    calls, index_map = (
-        builder_func(dataset, system_msg, stage_cfg, sampling_cfg)
-        if sampling_cfg
-        else builder_func(dataset, system_msg, stage_cfg)
-    )
-
+    if builder_func is build_single_hop_inference_calls:
+        calls, index_map = builder_func(dataset, system_msg, stage_cfg, get_sampling_cfg(stage_cfg))
+    else:
+        calls, index_map = builder_func(dataset, system_msg, stage_cfg)
     if not calls:
-        logger.warning(f"No valid inference calls for {step_name}")
-        return {}, []
+        raise ValueError(f"No valid inference calls for {step_name}")
 
     responses = run_inference(config=config, step_name=step_name, inference_calls=calls)
     return responses, index_map
@@ -76,11 +67,14 @@ def _build_and_run_inference(
 def _save_questions(rows: list[dict], config, subset: str) -> None:
     """Save question rows after deduplication."""
     if not (clean_rows := _remove_duplicate_questions(rows)):
-        return
+        raise ValueError(f"No valid questions generated for {subset}")
 
     logger.info(f"Saving {len(clean_rows)} {subset}")
     custom_save_dataset(
-        Dataset.from_list(clean_rows), config=config, subset=subset, push_to_hub=config.hf_configuration.push_to_hub
+        question_dataset(clean_rows),
+        config=config,
+        subset=subset,
+        push_to_hub=config.hf_configuration.push_to_hub,
     )
 
 
@@ -111,9 +105,8 @@ def run_single_hop(config) -> None:
             )
 
         with log_step("saving_questions"):
-            if rows := parse_single_hop_responses(responses, index_map, stage_cfg):
-                _save_questions(rows, config, "single_hop_questions")
-                logger.info(f"Saved {len(rows)} single-shot questions")
+            rows = parse_single_hop_responses(responses, index_map, stage_cfg)
+            _save_questions(rows, config, "single_hop_questions")
 
 
 def run_multi_hop(config) -> None:
@@ -156,24 +149,24 @@ def run_cross_document(config) -> None:
     }
 
     logger.info("Starting cross-document generation")
-    if cross_ds := create_cross_document_dataset(chunked_ds, cross_cfg):
-        logger.info(f"Generated {len(cross_ds)} cross-document combinations")
-        _process_questions(
-            cross_ds, "cross_document_questions", system_msg, stage_cfg, config, "cross_document_question_generation"
-        )
+    cross_ds = create_cross_document_dataset(chunked_ds, cross_cfg)
+    _process_questions(
+        cross_ds, "cross_document_questions", system_msg, stage_cfg, config, "cross_document_question_generation"
+    )
 
 
 def _process_questions(dataset: Dataset, label: str, system_msg: dict, stage_cfg: Any, config, step_name: str) -> None:
     """Process and save a set of questions."""
     if not dataset or len(dataset) == 0:
-        logger.warning(f"No valid {label} dataset")
-        return
+        raise ValueError(f"No valid input documents for {label}")
 
     responses, index_map = _build_and_run_inference(
         dataset, system_msg, stage_cfg, build_multi_hop_inference_calls, step_name, config
     )
 
-    if rows := parse_multi_hop_responses(responses, index_map, stage_cfg):
-        _save_questions(rows, config, label)
-    else:
-        logger.warning(f"No valid questions parsed for {label} (check model output format)")
+    rows = parse_multi_hop_responses(responses, index_map, stage_cfg)
+    source_map = {row["document_id"]: row.get("sources") for row in dataset if row.get("sources")}
+    for row in rows:
+        if row["document_id"] in source_map:
+            row["sources"] = source_map[row["document_id"]]
+    _save_questions(rows, config, label)

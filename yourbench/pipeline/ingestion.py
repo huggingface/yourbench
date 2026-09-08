@@ -1,6 +1,6 @@
 import io
-import uuid
 import base64
+import hashlib
 from pathlib import Path
 
 import fitz
@@ -31,20 +31,22 @@ def run(config) -> None:
         source_dir = Path(ingestion_config.source_documents_dir)
         output_dir = Path(ingestion_config.output_dir)
 
+        if not source_dir.is_dir():
+            raise FileNotFoundError(f"Source directory not found: {source_dir}")
         # Process files
         processor = _get_processor(config)
         successful_outputs: list[Path] = []
 
         # Collect all files to process
-        all_files = [f for f in source_dir.rglob("*") if f.is_file()]
+        all_files = sorted(
+            f
+            for f in source_dir.rglob("*")
+            if f.is_file() and f.suffix.lower() in ingestion_config.supported_file_extensions
+        )
         logger.info(f"Found {len(all_files)} files to process")
 
+        failures = []
         for idx, file_path in enumerate(all_files, 1):
-            # Skip files in output directories to prevent recursive processing
-            if "output" in str(file_path):
-                logger.debug(f"Skipping file in output directory: {file_path}")
-                continue
-
             # Skip files in the output directory to prevent recursive processing
             try:
                 if output_dir.resolve() in file_path.resolve().parents or file_path.resolve() == output_dir.resolve():
@@ -61,14 +63,20 @@ def run(config) -> None:
                     if content := _convert_file(file_path, config, processor):
                         # Preserve relative path to avoid filename collisions
                         relative_path = file_path.relative_to(source_dir)
-                        output_path = output_dir / relative_path.with_suffix(".md")
+                        output_path = output_dir / relative_path.with_name(relative_path.name + ".md")
                         output_path.parent.mkdir(parents=True, exist_ok=True)
                         output_path.write_text(content, encoding="utf-8")
                         logger.debug(f"Converted {file_path.name} → {output_path.name}")
                         successful_outputs.append(output_path)
-                except Exception as e:
-                    logger.error(f"Failed to process {file_path.name}: {e}")
+                    else:
+                        failures.append(file_path.name)
+                except Exception:
+                    failures.append(file_path.name)
 
+        if failures:
+            raise ValueError(f"Failed to ingest {len(failures)} document(s): {failures}")
+        if not successful_outputs:
+            raise ValueError("No supported nonempty documents were ingested")
         logger.info(f"Processed {len(successful_outputs)} files")
 
         # Save dataset locally and/or upload to Hub
@@ -217,7 +225,9 @@ def _upload_to_hub(config, md_files: list[Path]):
         try:
             if content := path.read_text(encoding="utf-8").strip():
                 docs.append({
-                    "document_id": str(uuid.uuid4()),
+                    "document_id": hashlib.sha256(
+                        (str(path.relative_to(Path(config.pipeline.ingestion.output_dir))) + "\0" + content).encode()
+                    ).hexdigest()[:24],
                     "document_text": content,
                     "document_filename": path.name,
                     "document_metadata": {"file_size": path.stat().st_size},

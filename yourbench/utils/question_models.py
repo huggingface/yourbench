@@ -56,8 +56,8 @@ class QuestionRow:
 
         if self.question_mode == "multi-choice":
             self.choices = validate_list(self.choices)
-            if len(self.choices) != 4:
-                raise ValueError("Multi-choice questions must have exactly 4 choices.")
+            if not 2 <= len(self.choices) <= 26:
+                raise ValueError("Multi-choice questions require 2 to 26 choices.")
         else:
             self.choices = []
 
@@ -139,6 +139,7 @@ class QuestionRow:
             "document_id": self.document_id,
             "additional_instructions": self.additional_instructions,
             "question": self.question,
+            "question_mode": self.question_mode,
             "self_answer": self.self_answer,
             "estimated_difficulty": self.estimated_difficulty,
             "self_assessed_question_type": self.self_assessed_question_type,
@@ -172,3 +173,28 @@ class QuestionRow:
         # Fields that should always be included even if empty
         required_fields = {"document_id", "question", "generating_model"}
         return {k: v for k, v in d.items() if k in required_fields or (v is not None and v != "" and v != [])}
+
+
+def question_dataset(rows: list[dict]):
+    """Build a lossless Arrow table or report incompatible schema columns safely."""
+    import pyarrow as pa
+
+    from datasets import Dataset
+
+    columns = dict.fromkeys(key for row in rows for key in row)
+    aligned = [{key: row.get(key) for key in columns} for row in rows]
+    try:
+        return Dataset.from_list(aligned)
+    except (pa.ArrowException, TypeError):
+        conflicts = []
+        for key in columns:
+            try:
+                pa.array([row.get(key) for row in rows])
+            except (pa.ArrowException, TypeError):
+                conflicts.append(key)
+        names = ", ".join(conflicts) or "unknown column"
+        # Arrow's exception includes example values. Do not expose raw payloads.
+        raise ValueError(
+            f"Question schema conflict in columns: {names}. "
+            "Use compatible field types across question schemas or export them separately."
+        ) from None

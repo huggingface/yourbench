@@ -74,13 +74,14 @@ class TestCitationScoreRun:
             run(mock_config)
             mock_load.assert_not_called()
 
-    def test_run_empty_dataset_warns(self, mock_config):
+    def test_run_empty_dataset_fails(self, mock_config):
         """Empty dataset triggers warning and early return."""
         with patch("yourbench.pipeline.citation_score_filtering.custom_load_dataset") as mock_load:
             mock_load.return_value = Dataset.from_dict({})
 
             with patch("yourbench.pipeline.citation_score_filtering.custom_save_dataset") as mock_save:
-                run(mock_config)
+                with pytest.raises(ValueError, match="empty"):
+                    run(mock_config)
                 mock_save.assert_not_called()
 
     def test_run_processes_rows(self, mock_config):

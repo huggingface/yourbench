@@ -150,3 +150,12 @@ After running the `citation_score_filtering` pipeline stage, three additional co
 - `citation_score`: Measures how well the generated answer is grounded in the source material. It is a weighted final score combining the above metrics (default is `final_score = alpha * avg_chunk_score + beta * avg_answer_score`, where `alpha=0.7` and `beta=0.3`)
 
 </details>
+## Current export additions
+
+- `question_data`: the original schema-validated payload, before normalization and MCQ shuffling.
+- `question_mode`: `open-ended` or `multi-choice`.
+- `sources`: canonical `{document_id, chunk_id}` pairs; use these instead of decoding synthetic IDs.
+- `document_ids`, `documents`: all referenced document identities and text, including cross-document evidence.
+- `choices`, `gold`: choices and their correct indices for every mode. Open-ended rows have `choices: [answer]`, `gold: [0]`; `ground_truth_answer` retains the text.
+
+Additional custom fields are preserved in exported rows when their types are compatible across the combined dataset. See [schema contracts](CUSTOM_SCHEMAS.md#validation-and-export-contracts).

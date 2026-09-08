@@ -38,24 +38,37 @@ Generate high-quality QA pairs and evaluation datasets from any source documents
 
 ## Quick Start
 
-Use [uv](https://docs.astral.sh/uv/getting-started/installation/) to run the packaged CLI directly:
+Describe the evaluation you want and point YourBench at your documents:
 
 ```bash
-uvx --from yourbench yourbench run example/default_example/config.yaml --debug
+pip install -e .
+yourbench create "Test understanding of policy exceptions and difficult customer questions" \
+  --source ./documents --model YOUR_MODEL_ID --output ./benchmark
 ```
 
-The example config works out-of-the-box with env vars from `.env` (see `.env.template`).
-
-Install locally if you prefer:
+For an OpenAI-compatible endpoint:
 
 ```bash
-uv pip install yourbench
-yourbench run example/default_example/config.yaml
+yourbench create "Build questions about policy exceptions" \
+  --source ./documents --model YOUR_MODEL_ID --output ./benchmark \
+  --base-url http://localhost:8000/v1 --api-key-env MODEL_API_KEY
 ```
+
+Set `MODEL_API_KEY` in your environment, or omit `--api-key-env` for an unauthenticated local endpoint. Hugging Face providers use `HF_TOKEN` when available.
+
+YourBench interprets the brief, saves `plan.json` and `config.yaml`, then generates local datasets and JSONL under the output directory. Add `--plan-only` to inspect the interpretation first (this still makes a model call). Rerun a saved recipe with:
+
+```bash
+yourbench run ./benchmark/config.yaml
+```
+
+The brief can specify domain, audience, language, difficulty, and question style. Exact counts, dollar budgets, conversational tasks, and executable evaluators are currently unsupported and should be reported by the planner. Generated answers still require evaluation of their quality; schema validation checks structure, not factual correctness.
+
+The new frontend defaults to local output. YAML configurations remain supported for explicit stage/model settings. See [CLI reference](docs/CLI.md), [configuration changes](docs/CONFIGURATION.md#configuration-changes-in-the-natural-language-redesign), and [schema/export contracts](docs/CUSTOM_SCHEMAS.md#validation-and-export-contracts).
 
 ## Installation
 
-Requires **Python 3.12+**.
+Requires **Python 3.12**.
 
 ```bash
 # With uv (recommended)
@@ -122,10 +135,11 @@ YourBench provides several CLI commands:
 
 | Command | Description |
 |---------|-------------|
+| `yourbench create "brief" --source DIR --model MODEL --output DIR` | Interpret an objective and generate a local benchmark |
 | `yourbench run <config>` | Run the full pipeline |
 | `yourbench validate <config>` | Check config without running |
 | `yourbench estimate <config>` | Estimate token usage |
-| `yourbench init` | Generate starter config interactively |
+| `yourbench init` | Generate a local starter config |
 | `yourbench stages` | List available pipeline stages |
 | `yourbench version` | Show version |
 

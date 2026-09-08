@@ -205,3 +205,11 @@ class MultiChoiceQuestion(BaseModel):
 - Add more detailed `description` to each field
 - Use `Literal` types to constrain values
 - Add `additional_instructions` in the pipeline config
+
+## Validation and export contracts
+
+Custom `DataFormat` models are validated against each generated candidate before normalization. Required fields, constraints, and nested structures must validate; invalid candidates are rejected and a run with no valid questions fails. Custom schemas must expose nonempty `question` and `answer` fields. Default question schemas are also rendered into prompts automatically.
+
+`question_data` preserves the validated original payload, including pre-shuffle multiple-choice data. Runtime fields such as source references and model identity cannot be overridden by generated fields. Additional fields survive evaluation export. Compatible schemas can be combined; conflicting types for a shared field produce an explicit schema-conflict error. Export such schemas separately or make the shared types consistent.
+
+Evaluation `gold` is always a list of choice indices. Open-ended rows use `choices: [answer]`, `gold: [0]`, with the text also in `ground_truth_answer`. Custom multiple-choice schemas can use 2–26 choices; the default still specifies four. Canonical `sources` contains document/chunk pairs and resolves cross-document evidence without assuming globally unique chunk IDs.

@@ -75,7 +75,7 @@ def _create_call(messages: List[Dict], tags: List[str], stage_cfg) -> InferenceC
         messages=messages,
         tags=tags,
         temperature=getattr(stage_cfg, "temperature", None),
-        max_retries=getattr(stage_cfg, "max_retries", 12),
+        max_retries=getattr(stage_cfg, "max_retries", 3),
     )
 
 

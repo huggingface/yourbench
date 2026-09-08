@@ -13,8 +13,8 @@ model_list:
 
 pipeline:
   ingestion:
-    source_documents_dir: example/custom_schema_demo/data
-    output_dir: example/custom_schema_demo/processed
+    source_documents_dir: ./data
+    output_dir: ./processed
   
   summarization:
   
@@ -22,6 +22,6 @@ pipeline:
   
   # Use the technical Q&A schema for single-hop questions
   single_hop_question_generation:
-    question_schema: example/custom_schema_demo/schemas/technical_qa.py
+    question_schema: ./schemas/technical_qa.py
   
   prepare_lighteval:

@@ -106,7 +106,7 @@ class TestQuestionRewritingFixes(unittest.TestCase):
         in some datasets, and the pipeline should skip gracefully instead of crashing.
         """
         # Mock custom_load_dataset to raise exception for missing subset
-        mock_load.side_effect = Exception("Subset 'multi_hop_questions' not found in dataset")
+        mock_load.side_effect = FileNotFoundError("Subset 'multi_hop_questions' not found in dataset")
         mock_config = Mock()
 
         # Call _process_question_type - should NOT raise exception
@@ -140,7 +140,7 @@ class TestQuestionRewritingFixes(unittest.TestCase):
         mock_save.assert_not_called()
 
     @patch("yourbench.pipeline.question_rewriting.custom_load_dataset")
-    def test_other_exceptions_are_caught_by_outer_handler(self, mock_load):
+    def test_storage_failures_propagate(self, mock_load):
         """Test that non-missing-subset exceptions are caught by outer try-except.
 
         Note: The function has an outer try-except that catches all exceptions
@@ -152,9 +152,7 @@ class TestQuestionRewritingFixes(unittest.TestCase):
         mock_load.side_effect = Exception("Connection error")
         mock_config = Mock()
 
-        # This should NOT raise (caught by outer try-except and logged)
-        # But the inner try-except should re-raise it, not catch it
-        try:
+        with self.assertRaisesRegex(Exception, "Connection error"):
             _process_question_type(
                 config=mock_config,
                 question_type="multi-hop",
@@ -164,9 +162,6 @@ class TestQuestionRewritingFixes(unittest.TestCase):
                 user_prompt_template="Template",
                 additional_instructions="Instructions",
             )
-            # Function catches and logs the error, doesn't raise
-        except Exception:
-            self.fail("Outer try-except should catch and log the error")
 
         # Verify custom_load_dataset was called
         mock_load.assert_called_once()

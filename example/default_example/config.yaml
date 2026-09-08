@@ -6,8 +6,8 @@ model_list:
 
 pipeline:
   ingestion:
-    source_documents_dir: example/default_example/data
-    output_dir: example/default_example/processed
+    source_documents_dir: ./data
+    output_dir: ./processed
   summarization:
   chunking:
   single_hop_question_generation:

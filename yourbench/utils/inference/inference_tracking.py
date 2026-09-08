@@ -3,7 +3,7 @@ import csv
 import atexit
 import datetime
 import collections
-from typing import Dict, List
+from typing import Any, Dict, List
 from dataclasses import dataclass
 
 import tiktoken
@@ -30,7 +30,17 @@ class InferenceMetrics:
 
 
 # Using defaultdict for easier accumulation
-_cost_data = collections.defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0, "calls": 0})
+_cost_data = collections.defaultdict(
+    lambda: {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "calls": 0,
+        "successes": 0,
+        "duration": 0.0,
+        "retries": 0,
+        "queue_time": 0.0,
+    }
+)
 _individual_log_file = os.path.join("logs", "inference_cost_log_individual.csv")
 _aggregate_log_file = os.path.join("logs", "inference_cost_log_aggregate.csv")
 
@@ -146,7 +156,6 @@ def _categorize_error(error: Exception) -> str:
 
 def log_inference_metrics(metrics: InferenceMetrics) -> None:
     """Log inference metrics to tracking system."""
-    _ensure_logs_dir()
     _log_individual_call(
         model_name=metrics.model_name,
         input_tokens=metrics.input_tokens,
@@ -154,40 +163,40 @@ def log_inference_metrics(metrics: InferenceMetrics) -> None:
         tags=[metrics.stage],
         encoding_name=metrics.encoding_name,
     )
-    _update_aggregate_cost(metrics.model_name, metrics.input_tokens, metrics.output_tokens)
+    update_aggregate_metrics(
+        metrics.model_name,
+        metrics.input_tokens,
+        metrics.output_tokens,
+        metrics.duration,
+        metrics.success,
+        metrics.queue_time,
+        metrics.retry_count,
+    )
 
 
-def get_performance_summary(model_name: str | None = None) -> Dict[str, any]:
-    """Get performance summary statistics."""
-    if model_name and model_name in _cost_data:
-        # Return summary for specific model
-        data = _cost_data[model_name]
-        summary = {
-            "model_name": model_name,
-            "total_calls": data["calls"],
-            "total_input_tokens": data["input_tokens"],
-            "total_output_tokens": data["output_tokens"],
-            "success_rate": 1.0,  # Default to 100% - would need more tracking for actual rate
-            "avg_duration": 2.0,  # Default average - would need more tracking for actual duration
-            "avg_request_size": data["input_tokens"] / max(1, data["calls"]),
-            "avg_response_size": data["output_tokens"] / max(1, data["calls"]),
-            "avg_retry_count": 0.0,  # Default - would need more tracking for actual retry count
-        }
-    else:
-        # Return overall summary
-        total_calls = sum(data["calls"] for data in _cost_data.values())
-        summary = {
-            "models": list(_cost_data.keys()),
-            "total_calls": total_calls,
-            "total_input_tokens": sum(data["input_tokens"] for data in _cost_data.values()),
-            "total_output_tokens": sum(data["output_tokens"] for data in _cost_data.values()),
-            "success_rate": 1.0,
-            "avg_duration": 2.0,
-            "avg_request_size": sum(data["input_tokens"] for data in _cost_data.values()) / max(1, total_calls),
-            "avg_response_size": sum(data["output_tokens"] for data in _cost_data.values()) / max(1, total_calls),
-            "avg_retry_count": 0.0,
-        }
-    return summary
+def get_performance_summary(model_name: str | None = None) -> Dict[str, Any]:
+    """Measured logical-request statistics; token counts are local estimates."""
+    records = (
+        [_cost_data[model_name]] if model_name in _cost_data else ([] if model_name else list(_cost_data.values()))
+    )
+    totals = {
+        key: sum(row[key] for row in records)
+        for key in ("calls", "input_tokens", "output_tokens", "successes", "duration", "retries", "queue_time")
+    }
+    denominator = max(1, totals["calls"])
+    return {
+        "model_name": model_name,
+        "models": [model_name] if model_name else list(_cost_data),
+        "total_calls": totals["calls"],
+        "total_input_tokens": totals["input_tokens"],
+        "total_output_tokens": totals["output_tokens"],
+        "success_rate": totals["successes"] / denominator,
+        "avg_duration": totals["duration"] / denominator,
+        "avg_request_size": totals["input_tokens"] / denominator,
+        "avg_response_size": totals["output_tokens"] / denominator,
+        "avg_retry_count": totals["retries"] / denominator,
+        "avg_queue_time": totals["queue_time"] / denominator,
+    }
 
 
 def update_aggregate_metrics(
@@ -203,3 +212,8 @@ def update_aggregate_metrics(
 ) -> None:
     """Update aggregate metrics for a model."""
     _update_aggregate_cost(model_name, input_tokens, output_tokens)
+    data = _cost_data[model_name]
+    data["successes"] += int(success)
+    data["duration"] += duration
+    data["retries"] += retry_count
+    data["queue_time"] += queue_time

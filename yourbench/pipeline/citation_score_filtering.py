@@ -43,15 +43,9 @@ def run(config) -> None:
 
         with log_step("loading_dataset", subset=cfg.subset):
             logger.info(f"Loading '{cfg.subset}' subset for citation score filtering...")
-            try:
-                lighteval_ds = custom_load_dataset(config=config, subset=cfg.subset)
-            except Exception as e:
-                logger.exception(f"Could not load subset '{cfg.subset}': {e}")
-                return
-
+            lighteval_ds = custom_load_dataset(config=config, subset=cfg.subset)
             if len(lighteval_ds) == 0:
-                logger.warning("Dataset is empty; nothing to process.")
-                return
+                raise ValueError("Cannot score an empty dataset")
             logger.debug(f"Loaded {len(lighteval_ds)} records")
 
     logger.debug(f"Computing citation scores for {len(lighteval_ds)} rows")

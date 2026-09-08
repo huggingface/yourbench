@@ -11,8 +11,8 @@ model_list:
 pipeline:
   ingestion:
     llm_ingestion: true
-    source_documents_dir: example/rich_pdf_extraction_with_gemini/data
-    output_dir: example/rich_pdf_extraction_with_gemini/processed
+    source_documents_dir: ./data
+    output_dir: ./processed
   summarization:
   chunking:
   single_hop_question_generation:

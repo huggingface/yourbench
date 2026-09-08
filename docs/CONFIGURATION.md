@@ -473,3 +473,17 @@ pipeline:
   single_hop_question_generation:
   prepare_lighteval:
 ```
+
+## Configuration changes in the natural-language redesign
+
+Start with `yourbench create "your objective" --source ./documents --model MODEL --output ./benchmark` to generate a reusable recipe. `--plan-only` makes a planning call and saves the recipe without generating questions. The planner reports unsupported requirements; exact example counts and dollar budgets are not enforced.
+
+All relative input, output, prompt, and schema paths now resolve beside the YAML file. Use absolute paths when sharing a recipe between locations. `file:prompt.md` explicitly loads a prompt file; `inline:your instructions` treats text literally. Missing prompt files and credential environment references are errors. Prompt text and `additional_instructions` do not expand environment variables.
+
+Automatic OpenAI configuration requires both `OPENAI_MODEL` and `OPENAI_API_KEY`; `OPENAI_BASE_URL` defaults to `https://api.openai.com/v1`. The `create` command instead uses `--model`/`YOURBENCH_MODEL` and explicit endpoint/key options. No model is silently selected by name.
+
+Chunking honors `token_overlap` and `encoding_name`, requires overlap smaller than `l_max_tokens`, and supports `input_subset: ingested` to skip summarization explicitly. Enabled single-hop `chunk_sampling` selects `num_samples` chunks **per document**, with `strategy: random` or `first`; it does not specify a final question count.
+
+Enabling question rewriting routes active generation outputs to their rewritten subsets unless export subset names are explicitly set. Missing required inputs, model failures, and generation with no valid questions fail the run. `run.json` beside the local dataset directory records completion/failure; existing artifacts from previous runs may still exist after a failure.
+
+The compiled natural-language recipe saves locally and exports JSONL; it does not upload to the Hub. For YAML runs, `push_to_hub: false` also disables remote reads and dataset-card publication. Named artifacts must be saved as a `DatasetDict`. Export files remain under the configured JSONL directory.

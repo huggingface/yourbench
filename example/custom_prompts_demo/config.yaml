@@ -11,13 +11,13 @@ model_list:
 
 pipeline:
   ingestion:
-    source_documents_dir: example/custom_prompts_demo/data
-    output_dir: example/custom_prompts_demo/processed
+    source_documents_dir: ./data
+    output_dir: ./processed
   summarization:
   chunking:
   single_hop_question_generation:
     # Use custom prompt for kid-friendly questions
-    single_hop_system_prompt: example/custom_prompts_demo/custom_prompts/single_hop_system_prompt.md
+    single_hop_system_prompt: ./custom_prompts/single_shot_system_prompt.md
   multi_hop_question_generation:
-    multi_hop_system_prompt: example/custom_prompts_demo/custom_prompts/multi_hop_system_prompt.md
+    multi_hop_system_prompt: ./custom_prompts/multi_hop_system_prompt.md
   prepare_lighteval:

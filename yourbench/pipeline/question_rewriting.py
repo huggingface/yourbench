@@ -20,7 +20,6 @@ from datasets import Dataset
 from yourbench.utils.dataset_engine import custom_load_dataset, custom_save_dataset
 from yourbench.utils.parsing_engine import extract_content_from_xml_tags
 from yourbench.utils.logging_context import log_stage
-from yourbench.utils.question_models import QuestionRow
 from yourbench.utils.inference.inference_core import InferenceCall, run_inference
 
 
@@ -161,13 +160,7 @@ def _process_question_rewriting_responses(
             if "question_mode" not in new_row_dict:
                 new_row_dict["question_mode"] = "open-ended"  # Default for older datasets
 
-            try:
-                # Validate and structure the data using QuestionRow
-                question_row = QuestionRow(**new_row_dict)
-                rewritten_rows.append(question_row.to_dict())
-            except (TypeError, ValueError) as e:
-                logger.warning(f"Skipping row {dataset_idx} due to validation error: {e}")
-                logger.debug(f"Row data: {new_row_dict}")
+            rewritten_rows.append(new_row_dict)
 
     return rewritten_rows
 
@@ -180,96 +173,49 @@ def _process_question_type(
     system_prompt: str,
     user_prompt_template: str,
     additional_instructions: str,
-) -> None:
-    """
-    Loads, rewrites, and saves a specific type of questions.
-
-    Args:
-        config: The main configuration dictionary.
-        question_type: A string describing the question type for logging (e.g., "single-hop").
-        load_subset: The dataset subset to load questions from.
-        save_subset: The dataset subset to save rewritten questions to.
-        system_prompt: The system prompt for the rewriting model.
-        user_prompt_template: The user prompt template for the rewriting model.
-        additional_instructions: Instructions for the rewriting model.
-    """
+) -> bool:
+    """Rewrite an available question subset; preserve all payload and provenance fields."""
     try:
-        logger.info(f"Processing {question_type} questions...")
-        try:  # skipping question rewriting if subset not found
-            dataset = custom_load_dataset(config=config, subset=load_subset)
-        except Exception as e:
-            if "not found" in str(e).lower():
-                logger.warning(f"Subset '{load_subset}' not found. Skipping {question_type} question rewriting.")
-                return
-            else:
-                raise e
-
-        if not dataset or len(dataset) == 0:
-            logger.warning(f"No {question_type} questions found or dataset is empty.")
-            return
-
-        calls, indices = _build_question_rewriting_calls(
-            dataset, system_prompt, user_prompt_template, additional_instructions
-        )
-
-        if not calls:
-            logger.warning(f"No valid {question_type} questions to rewrite.")
-            return
-
-        responses = run_inference(config=config, step_name="question_rewriting", inference_calls=calls)
-        rewritten_rows = _process_question_rewriting_responses(responses, indices, dataset)
-
-        if not rewritten_rows:
-            logger.warning(f"No {question_type} questions were successfully rewritten.")
-            return
-
-        rewritten_ds = Dataset.from_list(rewritten_rows)
-        custom_save_dataset(
-            dataset=rewritten_ds, config=config, subset=save_subset, push_to_hub=config.hf_configuration.push_to_hub
-        )
-        logger.success(f"Saved {len(rewritten_rows)} rewritten {question_type} questions.")
-
-    except Exception as e:
-        logger.error(f"Error processing {question_type} questions: {e}")
+        dataset = custom_load_dataset(config=config, subset=load_subset)
+    except FileNotFoundError:
+        return False
+    if not len(dataset):
+        raise ValueError(f"Cannot rewrite empty subset '{load_subset}'")
+    calls, indices = _build_question_rewriting_calls(
+        dataset, system_prompt, user_prompt_template, additional_instructions
+    )
+    if len(calls) != len(dataset):
+        raise ValueError(f"Subset '{load_subset}' contains rows without questions")
+    responses = run_inference(config, "question_rewriting", calls)
+    rewritten_rows = _process_question_rewriting_responses(responses, indices, dataset)
+    if len(rewritten_rows) != len(indices) * len(responses) or not rewritten_rows:
+        raise ValueError(f"Incomplete or invalid rewriting responses for '{load_subset}'")
+    keys = set().union(*(row.keys() for row in rewritten_rows))
+    rewritten_ds = Dataset.from_list([{key: row.get(key) for key in keys} for row in rewritten_rows])
+    custom_save_dataset(rewritten_ds, config, subset=save_subset, push_to_hub=config.hf_configuration.push_to_hub)
+    return True
 
 
 def run(config) -> None:
-    """
-    Main entry point for the question_rewriting pipeline stage.
+    from yourbench.pipeline.registry import QUESTION_SUBSETS
 
-    This stage:
-    1. Loads single-hop and multi-hop question datasets
-    2. Sends each question to an LLM for question_rewriting
-    3. Parses the rewritten questions
-    4. Saves new datasets with rewritten questions
-    """
+    stage_cfg = config.pipeline.question_rewriting
+    if not stage_cfg.run:
+        return
+    completed = 0
     with log_stage("question_rewriting"):
-        stage_cfg = config.pipeline.question_rewriting
-        if not stage_cfg.run:
-            logger.info("question_rewriting stage is disabled. Skipping.")
-            return
-
-        logger.info("Starting question question_rewriting stage...")
-
-    # Get prompts from configuration
-    system_prompt = stage_cfg.question_rewriting_system_prompt
-    user_prompt_template = stage_cfg.question_rewriting_user_prompt
-    additional_instructions = stage_cfg.additional_instructions
-
-    question_types_to_process = {
-        "single-hop": ("single_hop_questions", "single_hop_questions_rewritten"),
-        "multi-hop": ("multi_hop_questions", "multi_hop_questions_rewritten"),
-    }
-
-    for question_type, (load_subset, save_subset) in question_types_to_process.items():
-        _process_question_type(
-            config=config,
-            question_type=question_type,
-            load_subset=load_subset,
-            save_subset=save_subset,
-            system_prompt=system_prompt,
-            user_prompt_template=user_prompt_template,
-            additional_instructions=additional_instructions,
-        )
-
-    logger.success("Question question_rewriting stage completed")
+        for stage, subset in QUESTION_SUBSETS.items():
+            rewritten = _process_question_type(
+                config,
+                stage,
+                subset,
+                f"{subset}_rewritten",
+                stage_cfg.question_rewriting_system_prompt,
+                stage_cfg.question_rewriting_user_prompt,
+                stage_cfg.additional_instructions,
+            )
+            if not rewritten and getattr(config.pipeline, stage).run:
+                raise FileNotFoundError(f"Expected generated subset '{subset}' for rewriting")
+            completed += rewritten
+    if not completed:
+        raise ValueError("No question subsets found for rewriting")

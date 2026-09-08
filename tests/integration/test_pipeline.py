@@ -76,7 +76,7 @@ def mock_config(temp_dir):
                 "h_min": 2,
                 "h_max": 5,
                 "num_multihops_factor": 2,
-                "token_overlap": 512,
+                "token_overlap": 32,
                 "encoding_name": "cl100k_base",
             },
             "single_hop_question_generation": {
@@ -139,7 +139,11 @@ def test_ingestion_stage(mock_config, temp_dir, mock_no_docs):
         mock_convert.return_value = "mocked content"
         from yourbench.pipeline.ingestion import run
 
-        run(mock_config)
+        if mock_no_docs:
+            with pytest.raises(ValueError, match="No supported"):
+                run(mock_config)
+        else:
+            run(mock_config)
 
         if mock_no_docs:
             mock_convert.assert_not_called()
@@ -169,10 +173,8 @@ def test_summarization_stage(mock_config):
                 "<final_summary>Summary for doc2</final_summary>",
             ]
         }
-        mock_extract.side_effect = (
-            lambda text, tag: f"Summary for doc{text.split('doc')[1].split('<')[0]}"
-            if tag == "final_summary"
-            else None
+        mock_extract.side_effect = lambda text, tag: (
+            f"Summary for doc{text.split('doc')[1].split('<')[0]}" if tag == "final_summary" else None
         )
 
         from yourbench.pipeline.summarization import run
@@ -266,6 +268,7 @@ def test_lighteval_stage(mock_config):
         "source_chunk_ids": [["chunk1", "chunk2"]],
         "question": ["Multi-hop question?"],
         "self_answer": ["A"],
+        "choices": [["(A) First", "(B) Second", "(C) Third", "(D) Fourth"]],
         "estimated_difficulty": [7],
         "self_assessed_question_type": ["reasoning"],
         "question_mode": ["multi-choice"],

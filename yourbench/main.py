@@ -56,7 +56,7 @@ def configure_logging(debug: bool = False, log_dir: Path = None, quiet: bool = F
     # File handler - JSON structured logs
     if log_dir is None:
         log_dir = Path(os.getenv("YOURBENCH_LOG_DIR", "logs"))
-    log_dir.mkdir(exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = log_dir / f"yourbench_{timestamp}.jsonl"
@@ -92,8 +92,6 @@ def cleanup_logging():
 
 atexit.register(cleanup_logging)
 
-# Initialize logging with default configuration (quiet mode for Rich output)
-configure_logging(quiet=True)
 
 app = typer.Typer(
     name="yourbench",
@@ -142,6 +140,41 @@ def _print_config_summary(config) -> None:
 
     console.print(table)
     console.print()
+
+
+@app.command()
+def create(
+    brief: str = typer.Argument(..., help="Describe the benchmark you want to build"),
+    source: Path = typer.Option(..., "--source", help="Directory of source documents"),
+    output: Path = typer.Option(..., "--output", help="New or empty output directory"),
+    model: str = typer.Option("", "--model", envvar="YOURBENCH_MODEL", help="Model identifier"),
+    provider: str | None = typer.Option(None, "--provider", help="Inference provider"),
+    base_url: str | None = typer.Option(None, "--base-url", help="Compatible inference endpoint"),
+    api_key_env: str | None = typer.Option(None, "--api-key-env", help="Name of the API key environment variable"),
+    plan_only: bool = typer.Option(
+        False, "--plan-only", help="Make one planning call and save a recipe without generation"
+    ),
+) -> None:
+    """Build a benchmark from a natural-language brief; save a reusable local recipe."""
+    from yourbench.planning import create_recipe
+    from yourbench.conf.loader import load_config
+    from yourbench.pipeline.handler import run_pipeline_with_progress
+
+    try:
+        intent, config_path = create_recipe(brief, source, output, model, provider, base_url, api_key_env)
+        console.print(f"Saved recipe: {config_path}", markup=False)
+        for assumption in intent.assumptions:
+            console.print(f"Assumption: {assumption}", markup=False)
+        if not plan_only:
+            config = load_config(config_path)
+            run_pipeline_with_progress(config, console=console)
+            console.print(f"Benchmark saved to {config_path.parent}", markup=False)
+    except Exception as exc:
+        from pydantic import ValidationError
+
+        message = "Planner returned an invalid benchmark intent" if isinstance(exc, ValidationError) else str(exc)
+        console.print(f"Creation failed: {message}", markup=False)
+        raise typer.Exit(1) from None
 
 
 @app.command()
@@ -239,152 +272,45 @@ def validate(
 
 @app.command()
 def init(
-    output: str = typer.Option("config.yaml", "--output", "-o", help="Output file path"),
+    output: Path = typer.Option(Path("config.yaml"), "--output", "-o", help="Output file path"),
     force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing file"),
+    model: str = typer.Option("YOUR_MODEL_ID", "--model", envvar="YOURBENCH_MODEL", help="Model identifier"),
+    source: Path = typer.Option(
+        Path("data/raw"), "--source", help="Source directory, resolved from current directory"
+    ),
 ) -> None:
-    """Generate a starter configuration file interactively."""
-    from rich.prompt import Prompt, Confirm
+    """Write a local starter recipe with all required stages; edit credentials before running."""
+    import yaml
 
-    _print_banner()
-
-    output_path = Path(output)
-    if output_path.exists() and not force:
-        console.print(f"[yellow]\u26a0[/yellow] File already exists: {output}")
-        if not Confirm.ask("Overwrite?"):
-            raise typer.Exit(0)
-
-    console.print("[cyan]Let's create your YourBench configuration![/cyan]")
-    console.print()
-
-    # Basic setup
-    dataset_name = Prompt.ask("Dataset name", default="my-yourbench-dataset")
-
-    hf_org = Prompt.ask(
-        "HuggingFace organization (leave empty for personal)", default=os.getenv("HF_ORGANIZATION", "")
-    )
-
-    source_dir = Prompt.ask("Source documents directory", default="data/raw")
-
-    output_dir = Prompt.ask("Processed output directory", default="data/processed")
-
-    # Model configuration
-    console.print()
-    console.print("[cyan]Model Configuration[/cyan]")
-
-    use_env = Confirm.ask("Use model from environment variables (OPENAI_*)", default=True)
-
-    model_name = ""
-    if not use_env:
-        model_name = Prompt.ask("Model name", default="gpt-4")
-
-    # Pipeline stages
-    console.print()
-    console.print("[cyan]Pipeline Stages[/cyan]")
-
-    stages = []
-    if Confirm.ask("Enable ingestion (document processing)", default=True):
-        stages.append("ingestion")
-    if Confirm.ask("Enable single-hop question generation", default=True):
-        stages.append("single_hop_question_generation")
-    if Confirm.ask("Enable multi-hop question generation", default=False):
-        stages.append("multi_hop_question_generation")
-    if Confirm.ask("Enable cross-document question generation", default=False):
-        stages.append("cross_document_question_generation")
-    if Confirm.ask("Enable lighteval preparation", default=True):
-        stages.append("prepare_lighteval")
-
-    private = Confirm.ask("Make dataset private", default=True)
-
-    # Generate config
-    config_lines = [
-        "# YourBench Configuration",
-        f"# Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        "",
-        "hf_configuration:",
-        f"  hf_dataset_name: {dataset_name}",
-    ]
-
-    if hf_org:
-        config_lines.append(f"  hf_organization: {hf_org}")
-
-    config_lines.extend([
-        "  hf_token: $HF_TOKEN",
-        f"  private: {str(private).lower()}",
-        "  push_to_hub: true",
-        "",
-    ])
-
-    if use_env:
-        config_lines.extend([
-            "model_list:",
-            "  - model_name: $OPENAI_MODEL",
-            "    base_url: $OPENAI_BASE_URL",
-            "    api_key: $OPENAI_API_KEY",
-            "    max_concurrent_requests: 128",
-            "",
-        ])
-    elif model_name:
-        config_lines.extend([
-            "model_list:",
-            f"  - model_name: {model_name}",
-            "    api_key: $OPENAI_API_KEY",
-            "    max_concurrent_requests: 128",
-            "",
-        ])
-
-    config_lines.append("pipeline:")
-
-    if "ingestion" in stages:
-        config_lines.extend([
-            "  ingestion:",
-            f"    source_documents_dir: {source_dir}",
-            f"    output_dir: {output_dir}",
-            "",
-        ])
-
-    if "single_hop_question_generation" in stages:
-        config_lines.extend([
-            "  single_hop_question_generation:",
-            "    question_mode: open-ended",
-            "",
-        ])
-
-    if "multi_hop_question_generation" in stages:
-        config_lines.extend([
-            "  multi_hop_question_generation:",
-            "    question_mode: open-ended",
-            "",
-        ])
-
-    if "cross_document_question_generation" in stages:
-        config_lines.extend([
-            "  cross_document_question_generation:",
-            "    question_mode: open-ended",
-            "    max_combinations: 50",
-            "",
-        ])
-
-    if "prepare_lighteval" in stages:
-        config_lines.extend([
-            "  prepare_lighteval:",
-            "",
-        ])
-
-    config_content = "\n".join(config_lines)
-
-    # Write file
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(config_content)
-
-    console.print()
-    console.print(
-        Panel.fit(
-            f"[bold green]\u2713 Configuration saved to {output}[/bold green]\n\n"
-            f"Run with: [cyan]yourbench run {output}[/cyan]",
-            title="Success",
-            border_style="green",
-        )
-    )
+    if output.exists() and not force:
+        console.print(f"File already exists: {output}. Use --force to overwrite.", markup=False)
+        raise typer.Exit(1)
+    config = {
+        "hf_configuration": {
+            "hf_dataset_name": "benchmark",
+            "push_to_hub": False,
+            "upload_card": False,
+            "private": True,
+            "local_dataset_dir": "datasets",
+            "export_jsonl": True,
+            "jsonl_export_dir": "jsonl",
+        },
+        "model_list": [{"model_name": model, "max_concurrent_requests": 8}],
+        "pipeline": {
+            "ingestion": {
+                "source_documents_dir": str(source.expanduser().resolve()),
+                "output_dir": "processed",
+                "upload_to_hub": False,
+            },
+            "summarization": {},
+            "chunking": {},
+            "single_hop_question_generation": {"question_mode": "open-ended"},
+            "prepare_lighteval": {},
+        },
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(yaml.safe_dump(config, sort_keys=False))
+    console.print(f"Saved {output}. Configure the model endpoint/key, then run: yourbench run {output}", markup=False)
 
 
 @app.command()
@@ -397,20 +323,10 @@ def stages() -> None:
     table.add_column("Stage", style="cyan")
     table.add_column("Description", style="white")
 
-    stage_info = [
-        ("ingestion", "Process source documents (PDF, Markdown, text) into structured format"),
-        ("summarization", "Generate summaries of document content"),
-        ("chunking", "Split documents into smaller chunks for question generation"),
-        ("single_hop_question_generation", "Generate standalone Q&A pairs from chunks"),
-        ("multi_hop_question_generation", "Generate questions requiring multiple chunks to answer"),
-        ("cross_document_question_generation", "Generate questions spanning multiple documents"),
-        ("question_rewriting", "Rewrite questions for clarity and consistency"),
-        ("prepare_lighteval", "Format dataset for LightEval evaluation framework"),
-        ("citation_score_filtering", "Filter questions based on citation quality scores"),
-    ]
+    from yourbench.pipeline.registry import STAGES
 
-    for i, (stage, desc) in enumerate(stage_info, 1):
-        table.add_row(str(i), stage, desc)
+    for i, stage in enumerate(STAGES.values(), 1):
+        table.add_row(str(i), stage.name, stage.title)
 
     console.print(table)
     console.print()
@@ -507,7 +423,7 @@ def version_command() -> None:
 def main() -> None:
     """Entry point for the CLI."""
     # Handle version flag
-    if "--version" in sys.argv or "-v" in sys.argv:
+    if len(sys.argv) == 2 and sys.argv[1] in {"--version", "-v"}:
         version_command()
         return
 
@@ -520,8 +436,7 @@ def main() -> None:
     # If first arg looks like a path (not a command), assume it's 'run'
     if len(sys.argv) > 1:
         first_arg = sys.argv[1]
-        commands = ["run", "version", "validate", "init", "stages", "estimate"]
-        if not first_arg.startswith("-") and first_arg not in commands:
+        if not first_arg.startswith("-") and Path(first_arg).suffix in {".yaml", ".yml"}:
             sys.argv = [sys.argv[0], "run"] + sys.argv[1:]
 
     app()
