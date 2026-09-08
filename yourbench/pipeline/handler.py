@@ -43,6 +43,7 @@ def validate_pipeline(config) -> None:
             from yourbench.pipeline.prepare_lighteval import QUESTION_INPUTS
 
             selected = []
+            optional = []
             for _, field, generation, default in QUESTION_INPUTS:
                 subset = (
                     default if stage == "question_rewriting" else getattr(config.pipeline.prepare_lighteval, field)
@@ -50,14 +51,19 @@ def validate_pipeline(config) -> None:
                 required = getattr(config.pipeline, generation).run or subset != default
                 if required or subset in available:
                     selected.append(subset)
-                    continue
-                try:
-                    existing = custom_load_dataset(config, subset)
-                except MissingSubsetError:
-                    continue
-                if len(existing):
-                    selected.append(subset)
-                    available.add(subset)
+                else:
+                    optional.append(subset)
+            # Scheduled or explicit inputs suffice for a fresh run. Probe saved
+            # defaults only when resuming without any selected question producer.
+            if not selected:
+                for subset in optional:
+                    try:
+                        existing = custom_load_dataset(config, subset)
+                    except MissingSubsetError:
+                        continue
+                    if len(existing):
+                        selected.append(subset)
+                        available.add(subset)
             if not selected:
                 raise PipelineError(f"Stage '{stage}' requires at least one question subset")
             inputs = (*inputs, *selected)

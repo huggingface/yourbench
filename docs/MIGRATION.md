@@ -65,7 +65,7 @@ Canonical `sources` stores document/chunk pairs; cross-document evidence does no
 
 ## Runtime and storage changes
 
-- One stage catalogue defines ordering and artifact dependencies. Preflight checks required inputs and persistence settings before generation.
+- One stage catalogue defines ordering and artifact dependencies. Preflight checks required inputs and persistence settings before generation. Fresh Hub-backed runs use scheduled outputs without probing optional repositories before ingestion creates them; resume-only runs still inspect saved inputs and propagate access failures.
 - Inference preserves request order, bounds concurrency per model, retries transient failures, cancels sibling work on failure, and closes clients. Failed requests no longer become fabricated empty answers.
 - Inference metrics use `logs/inference.jsonl`; redundant CSV/atexit reporting was removed. Token counts are local estimates, not provider billing totals.
 - Ingestion converts each file once and publishes the ingested dataset only after all documents convert. Conversion failures are errors. `llm_ingestion` applies to PDF pages. Converted filenames retain their original extension (`policy.txt.md`), and document IDs depend on relative source path plus text, making corpus moves stable.
@@ -83,7 +83,7 @@ Citation scoring adds overlap scores; it does not filter rows or establish factu
 
 ## Verification and limits
 
-At the pre-merge checkpoint, 245 tests pass, including real CLI subprocesses against a local HTTP server, Python API execution, credential-free inspection, corrupt-storage and interrupted-write tests, concurrency/cancellation tests, and offline example checks. Five deliberately injected runtime defects were caught in isolated copies; the [mutation report](superpowers/plans/2026-09-07-flat-core-verification.md) includes reproduction steps. Ruff, formatting, wheel/source builds, and imports from the built wheel were checked.
+At the pre-merge checkpoint, 250 tests pass, including real CLI subprocesses against a local HTTP server, Python API execution, credential-free inspection, corrupt-storage and interrupted-write tests, concurrency/cancellation tests, and offline example checks. Five deliberately injected runtime defects were caught in isolated copies; the [mutation report](superpowers/plans/2026-09-07-flat-core-verification.md) includes reproduction steps. Ruff, formatting, wheel/source builds, and imports from the built wheel were checked.
 
 A separate real-model trial used two fictional policy documents: the first run produced 18 questions and a rerun produced 21. All 11 logical calls succeeded without retries; dataset/JSONL parity, source references, answer indices, and all 98 citations passed verification. Two first-run single-hop questions asked about information present only in the other document and unnecessarily abstained. Subsequent prompts explicitly scope single-hop questions to their supplied chunk and combined questions to their supplied passages. Request tests cover that guidance; a new live semantic evaluation has not established that the issue is eliminated.
 
