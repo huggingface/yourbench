@@ -111,9 +111,11 @@ def test_create_plan_execute_rerun_and_failure(tmp_path, model_server):
         "--api-key-env",
         "YOURBENCH_TEST_KEY",
     ]
+    args += ["--max-tokens", "2000", "--concurrency", "2"]
     planned = invoke(tmp_path, [*args, "--plan-only"])
     assert planned.returncode == 0, planned.stdout + planned.stderr
     assert len(calls) == 1
+    assert calls[0]["max_tokens"] == 2000
     config = output / "config.yaml"
     assert "local-test-secret" not in config.read_text()
     assert "YOURBENCH_TEST_KEY" in config.read_text()
@@ -129,7 +131,7 @@ def test_create_plan_execute_rerun_and_failure(tmp_path, model_server):
     assert not (tmp_path / "questions_and_answers.jsonl").exists()
     assert json.loads((output / "run.json").read_text())["status"] == "completed"
     # Regenerate a saved recipe, preserving source identity and replacing old subsets.
-    rerun = invoke(tmp_path, ["run", str(config), "--quiet"])
+    rerun = invoke(tmp_path, ["run", str(output), "--quiet"])
     assert rerun.returncode == 0, rerun.stdout + rerun.stderr
     records2 = [json.loads(line) for line in (output / "jsonl" / "prepared_lighteval.jsonl").read_text().splitlines()]
     assert records2[0]["sources"] == records[0]["sources"]
@@ -256,3 +258,46 @@ def test_saved_recipe_rewrites_and_exports_custom_payload_with_provenance(tmp_pa
     assert before["sources"][0]["chunk_id"] in prompt
     assert json.loads((output / "run.json").read_text())["status"] == "completed"
     assert "local-test-secret" not in config_path.read_text() + result.stdout + result.stderr
+
+
+def test_public_python_api_executes_bounded_recipe_and_reads_without_credentials(tmp_path, model_server, monkeypatch):
+    from yourbench import run, create, load_result
+
+    endpoint, calls, state = model_server
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHON_API_TEST_KEY", "local-test-secret")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "policy.md").write_text("Returns are allowed within thirty days.")
+    result = create(
+        "Test returns policy comprehension",
+        source=source,
+        output=tmp_path / "benchmark",
+        model="local-test",
+        base_url=endpoint,
+        api_key_env="PYTHON_API_TEST_KEY",
+        max_tokens=2000,
+        concurrency=2,
+    )
+    assert result.status == "completed"
+    assert len(calls) == 3
+    assert all(call["max_tokens"] == 2000 for call in calls)
+    first = result.load_dataset().to_list()
+    assert first[0]["ground_truth_answer"] == "Thirty days."
+    monkeypatch.delenv("PYTHON_API_TEST_KEY")
+    offline = load_result(result.config_path.parent)
+    assert offline.summary()["subsets"]["prepared_lighteval"]["rows"] == 1
+    assert offline.load_dataset().to_list() == first
+    assert len(calls) == 3
+    monkeypatch.setenv("PYTHON_API_TEST_KEY", "rotated-local-secret")
+    rerun = run(result.config_path.parent)
+    assert rerun.load_dataset().to_list()[0]["sources"] == first[0]["sources"]
+    assert len(calls) == 5
+    # Failure propagates through the public API and inspection reports failure,
+    # even though the previous evaluation artifact remains readable.
+    before_failure = rerun.load_dataset().to_list()
+    state["fail_generation"] = True
+    with pytest.raises(ValueError):
+        run(result.config_path)
+    assert load_result(result.config_path).status == "failed"
+    assert load_result(result.config_path).load_dataset().to_list() == before_failure

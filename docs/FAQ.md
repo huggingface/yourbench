@@ -1,314 +1,61 @@
-# FAQ: Frequently Asked Questions about YourBench
+# YourBench FAQ
 
-Welcome to the **YourBench** FAQ! This document aims to answer common questions about what YourBench is, how it works, and how you can use it to generate dynamic, document-grounded evaluation sets for Large Language Models. Below, you'll find practical information on installation, configuration, usage, and more.
+## What does it do?
 
----
+YourBench turns local documents into question-and-answer datasets. Start with a natural-language brief using `yourbench create`, or edit a YAML recipe. It generates benchmarks; it does not run candidate models against them or establish that the questions are correct.
 
-## 1. What Is YourBench?
+## How do I start?
 
-**YourBench** is an open-source framework designed to **generate new, domain-specific or up-to-date benchmarks** for evaluating Large Language Models (LLMs). Instead of relying on static (and often outdated or contaminated) benchmarks, YourBench takes _your_ custom documents—such as company reports, specialized academic texts, or newly published web content—and **automatically creates fresh question-answer pairs** to test models on relevant content. By doing so, it helps you:
+From a checkout, install with `pip install -e .`, then follow [the CLI guide](CLI.md). `yourbench init` creates a starter recipe without calling a model. `yourbench create --plan-only` calls the planner once and saves its interpretation for review.
 
-- Avoid contamination with older, widely used datasets.
-- Generate relevant evaluations for specialized or emerging topics.
-- Automatically produce large volumes of questions with minimal human labor or cost.
+The [examples](../example/README.md) include a small source corpus and save locally. Select a model you can access and configure its credentials before running them.
 
-YourBench also supports advanced pipeline stages like summarization, chunking, multi-hop question generation, citation filtering, and more, as detailed below.
+## What does “local” mean?
 
----
+`hf_configuration.push_to_hub: false` keeps dataset publication disabled. A remote inference endpoint still receives the document passages used in its requests. To keep inference on your machine too, configure a local OpenAI-compatible server. `HF_HUB_OFFLINE=1` disables Hub access; it does not disable model requests to a configured endpoint.
 
-## 2. What Does the General Pipeline Look Like?
+## Which stages should I enable?
 
-YourBench’s pipeline typically consists of these stages (in a default order):
+The usual order is ingestion, summarization, chunking, question generation and `prepare_lighteval`. Generation supports single passages, multiple passages from one document, and cross-document combinations. Rewriting and citation scoring are optional. `yourbench stages` lists registered stages.
 
-1. **Ingestion**  
-   Converts raw documents (PDF, MD, HTML, DOCX, etc.) into a normalized Markdown/text format.
+Including a stage in YAML enables it, even with `{}` or an empty value. Omit it or set `run: false` to disable it. Stages execute in dependency order, not YAML order. Saved subsets can supply inputs when earlier stages are disabled.
 
-2. **Upload/Save**  
-   Optionally packages ingested documents into a Hugging Face Dataset and pushes it to the Hub (or saves locally).
-   Each stage can save its intermediate output either locally or to the Hugging Face Hub (or both), depending on your hf_configuration.
-   - Local saving is controlled by `local_saving` and `local_dataset_dir`.
-   - Remote saving (Hub) is controlled by `push_to_hub` and credentials (token + dataset name). This ensures that downstream stages can reliably load subsets across runs.
+## Can I skip summaries?
 
-3. **Summarization**  
-   Creates short summaries of each document or chunk to provide global context.
+Yes. Enable ingestion and set `pipeline.chunking.input_subset: ingested`. Summaries provide document context but can contain errors. Generation should still be answerable from the actual supplied passages.
 
-4. **Chunking**  
-   Splits documents into manageable single-hop segments (e.g., by tokens or semantically) and optionally creates multi-hop groupings.
+## Can I use multiple models?
 
-5. **Single-Shot Question Generation**  
-   Generates questions from individual chunk(s) plus global summary. (These are usually simpler, fact based, or straightforward questions)
+Yes. Declare each model once in `model_list`, then assign model names in `model_roles`. Unassigned roles use the first model. Question generation can use multiple models. Summarization and PDF LLM ingestion each require exactly one model. Concurrency is bounded separately per model.
 
-6. **Multi-Hop Question Generation**  
-   Generates more complex, integrative questions by referencing multiple chunks. (These are usually more complex questions). Both single shot and multi-hop generate questions, however, the nature of the questions generated by both is very different!
+## What documents and chunking methods are supported?
 
-8. **LightEval**  
-   Assembles those questions into a final “evaluation dataset” that includes question text, ground truth, citations, and relevant chunk text.
+The default extension list is `.md`, `.txt`, `.pdf`. Add extensions such as `.html` explicitly in `supported_file_extensions` when needed. Ingestion converts files to text; `llm_ingestion: true` uses page images for PDFs and requires a vision-capable endpoint.
 
-9. **Citation Score Filtering**  
-   Performs fuzzy string matching to gauge how well each question’s citations match the source text, optionally filtering low-scoring items.
+Chunking uses token windows with configurable overlap. Set `l_max_tokens` and `token_overlap` directly under `pipeline.chunking`; there is no semantic chunker or nested `chunking_configuration`. For large documents, summarization splits and combines summaries. Configure sizes for your model's context window, allowing space for prompts and responses.
 
-You can control which stages run by toggling them in your config (e.g., `pipeline.ingestion.run: true` or `false`).
+## Where are the results?
 
----
+A recipe created by `create` stores `config.yaml`, `plan.json`, `run.json`, `datasets/`, `jsonl/` and `processed/` beneath its output directory. The final default subset is `prepared_lighteval`. See [dataset columns](DATASET_COLUMNS_DESCRIPTION.md) for loading and answer-index conventions.
 
-## 3. How Do I Install and Set Up YourBench?
+In hand-written YAML, paths resolve relative to the YAML file. Local and JSONL destinations are configured separately. Set `push_to_hub: true` explicitly only when you want publication, along with the destination and Hub credentials.
 
-1. **Clone the Repository**  
-   ```bash
-   git clone https://github.com/huggingface/yourbench.git
-   cd yourbench
-   ```
+## What happens on reruns or failure?
 
-2. **Install Dependencies**  
-   We recommend using a virtual environment. Then install with:
-   ```bash
-   pip install -r requirements.txt
-   ```
-   (If you plan to do semantic chunking or advanced tasks, you’ll need PyTorch, Transformers, etc. as indicated in the repository docs.)
+With `concat_if_exist: false`, saving replaces the named subset while retaining others. A stage failure stops the run; `run.json` records completed stages and failure status. Earlier completed stages remain saved. Dataset writes stage new content and restore the old directory if promotion fails; this is not a whole-run transaction or concurrent-writer guarantee.
 
-3. **Configure Your Environment Variables**  
-   Set required keys in `.env` or your shell. At minimum:
-   ```bash
-   OPENAI_API_KEY=...
-   OPENAI_BASE_URL=https://api.openai.com/v1  # or your provider
-   HF_TOKEN=...                               # needed to push datasets
-   HF_ORGANIZATION=...                        # optional; auto-detected if HF_TOKEN is set
-   ```
+Corrupt existing datasets raise errors instead of silently being replaced. Remote append requires an existing readable Hub subset. Use separate output directories for independent runs.
 
-4. **Prepare a Configuration File**  
-   Start from `example/default_example/config.yaml` (shipped with the repo) or the minimal example in `docs/CONFIGURATION.md`. Point `ingestion.source_documents_dir` at your documents and list your models in `model_list`.
+## Does citation scoring prove correctness?
 
----
+No. `citation_score_filtering` adds overlap scores; it does not remove rows or verify semantic correctness. Apply your own threshold or review after scoring. Inspect source scope, answer correctness, distractors and unsupported abstentions as well as citations. A successful pipeline run can still produce weak questions.
 
-## 4. How Do I Run the Pipeline?
+## How do I control generation volume?
 
-1. **Create or Edit a Config File**  
-   - Check out `example/configs/simple_example.yaml` (the minimal version).
-   - Update `source_documents_dir` to the folder containing your raw data.
-   - Optionally specify which model(s) you want for each pipeline stage in `model_list` and `model_roles`.
+Use `single_hop_question_generation.chunk_sampling`, reduce cross-document `max_combinations`, and tune `chunking.num_multihops_factor`. `yourbench estimate` estimates tokens without generation; it is not a spending cap. Neither exact question counts nor dollar budgets are enforced.
 
-2. **Call the YourBench CLI**  
-   From the repo, using uv (recommended):
-   ```bash
-   uvx --from yourbench yourbench run path/to/your_config.yaml --debug
-   ```
-   Or if installed locally:
-   ```bash
-   yourbench run path/to/your_config.yaml --debug
-   ```
+## Why did a response fail parsing?
 
-3. **View the Outputs**  
-   - By default, intermediate datasets are stored on Hugging Face Hub (if configured) and/or locally, named according to your `hf_configuration`.
-   - Logs (errors, pipeline progress, etc.) are written to the `logs/` folder.
+Question generation expects one JSON array matching the selected Pydantic schema. Whole JSON fences and the legacy whole `<output_json>` envelope are accepted, but surrounding prose, duplicate keys and nonfinite numbers are rejected. Fields are not guessed from synonyms. Malformed envelopes fail the stage; individual schema-invalid questions are rejected, and generation with no valid questions fails.
 
----
-
-## 5. How Should I Structure My Documents?
-
-YourBench is flexible. Typically:
-
-- **Ingestion** converts each raw file (PDF, MD, HTML, DOCX, etc.) into a standardized Markdown.  
-- If your documents are already in plain text or Markdown, just place them in a folder and point `ingestion.source_documents_dir` there.
-
-Multi-document ingestion is handled automatically: each file becomes a separate “document” entry in the resulting dataset.
-
----
-
-## 6. Can I Use Multiple Models in the Pipeline?
-
-Absolutely. In your config’s `model_list`, define multiple models. For example:
-```yaml
-model_list:
-  - model_name: gpt-4.1
-    base_url: https://api.openai.com/v1
-    api_key: $OPENAI_API_KEY
-  - model_name: Qwen/Qwen3-30B-A3B
-    provider: fireworks-ai
-```
-Then in `model_roles`, assign which model(s) perform each stage:
-```yaml
-model_roles:
-  ingestion:
-    - Qwen/Qwen3-30B-A3B
-  summarization:
-    - gpt-4.1
-    - Qwen/Qwen3-30B-A3B
-  single_hop_question_generation:
-    - gpt-4.1
-```
-YourBench will run inference calls in parallel for each model assigned.
-
----
-
-## 7. How Do I Generate Multi-Hop Questions?
-
-- Ensure the pipeline’s `multi_hop_question_generation` stage is set to `run: true`.
-- Make sure your chunking stage is also on and includes `multihop_chunks`, or define multi-hop chunking parameters in your config:
-  ```yaml
-  pipeline:
-    chunking:
-      chunking_configuration:
-        chunking_mode: semantic_chunking
-        h_min: 2
-        h_max: 5
-        num_multihops_factor: 5
-    multi_hop_question_generation:
-      run: true
-      # additional instructions or chunk sampling, etc.
-  ```
-- YourBench will then sample multi-chunk sets and call your chosen model(s) to produce questions requiring multiple pieces of context.
-
----
-
-## 8. How Does Citation Filtering Work?
-
-After generating questions, YourBench can **verify if each question is grounded** in its source chunk(s) by fuzzy matching. The pipeline stage `citation_score_filtering`:
-
-1. Compares the alleged citations to the actual chunk text (and optionally the ground-truth answer).
-2. Computes a “citation_score” by measuring string overlap (using partial ratio from `thefuzz`).
-3. Lets you filter or rank questions by how strongly they’re anchored in the original text.
-
----
-
-## 9. Can I Replicate Something Like MMLU with YourBench?
-
-Yes! In the paper, we demonstrate replicating the style and relative difficulty of MMLU subsets:
-
-1. Collect a few relevant documents for each subject domain (e.g., a handful of Wikipedia articles).
-2. Run the pipeline to generate multiple-choice questions.
-3. Evaluate your LLMs on these newly generated sets.
-   
-The results strongly correlated with the original MMLU in ranking models, but the newly generated questions are “harder” and are contamination-resistant. Just be sure to adapt your prompt instructions so that the question generation yields multiple-choice style Q&A.
-
----
-
-## 10. Where Are My Final Questions Stored?
-
-- After single-shot or multi-hop generation, your “raw” question datasets appear under subset names like `single_hop_questions`, `multi_hop_questions`.
-- The pipeline’s `lighteval` stage merges them into a single dataset called `lighteval`, containing columns like `question`, `ground_truth_answer`, `citations`, and the associated chunk(s).
-- By default, these subsets are saved on the HF Hub (under your designated dataset name) and/or locally, depending on your config.
-
----
-
-## 11. Do I Have to Push Everything to the Hugging Face Hub?
-
-Not necessarily. In your config’s `hf_configuration`, you can disable or enable pushing:
-
-```yaml
-hf_configuration:
-  local_saving: true              # Enables saving to disk
-  local_dataset_dir: ./results/datasets  # Where datasets are saved locally
-  push_to_hub: true               # Optional: also push each stage result to the Hub
-  concat_if_exist: false          # Whether to merge with existing datasets
-  # private: true                 # Whether Hub datasets should be private
-
-```
-You can set `local_dataset_dir` (under `hf_configuration`) to a path and store your resulting datasets entirely locally — as long as `local_saving: true` is also set. Alternatively, you can enable both local saving and Hub pushing. The pipeline is flexible to your preference.
-
----
-
-## 11b. How Are Intermediate Datasets Saved?
-
-Each pipeline stage saves its result using `custom_save_dataset()`. The behavior depends on both:
-- The config file, especially `hf_configuration.local_saving` and `local_dataset_dir`.
-- The per-stage logic, which calls:
-```yaml
-hf_settings = get_hf_settings(config)
-custom_save_dataset(
-    dataset=dataset,
-    config=config,
-    subset="stage_name",  # e.g., "summarized", "chunked"
-    save_local=hf_settings.local_saving,
-    push_to_hub=True,
-)
-```
-
-This ensures datasets are:
-- Persisted between stages, even across different runs.
-- Reloadable by exact subset name (e.g., "chunked"), preventing missing subset errors.
-
-## 12. What If My Documents Are Very Large?
-
-For large documents, the pipeline automatically:
-
-- Splits (chunking) by token-based thresholds or semantic boundaries.
-- Summarizes each chunk to keep context windows from overflowing your model’s max context length.
-- Optionally merges chunk-level summaries into a single short “document_summary.”
-
-Because chunking is crucial for big inputs, carefully tune the chunking config (e.g., `l_max_tokens`, overlap, or semantic threshold) to ensure coverage without overloading your model.
-
----
-
-## 13. What If My Model Has a Specific Context Window or Memory Constraint?
-
-Adjust the pipeline config to keep chunk sizes within that limit. For example:
-```yaml
-pipeline:
-  summarization:
-    max_tokens: 16384
-  chunking:
-    chunking_configuration:
-      chunking_mode: fast_chunking
-      l_max_tokens: 128  # or 1024 or 4096, depending on your model
-      token_overlap: 128
-```
-These parameters let you manage how aggressively we split large documents and how much overlap we maintain between splits.
-
----
-
-## 14. Is YourBench Only for English Text?
-
-No, the pipeline itself is language-agnostic. If your model supports a given language, YourBench can ingest and generate questions for that language. For chunking in semantic mode, ensure you select a suitable multilingual embedding model (e.g., `intfloat/multilingual-e5-large-instruct`) in the config.
-
----
-
-## 15. How Do I Control the Cost or Limit Inference Calls?
-
-- **Subset your data** using the `chunk_sampling` config to generate fewer questions.  
-- **Reduce multi-model usage** if you only need a single model for question generation.  
-- **Use smaller language models** for some stages (like summarization or ingestion) while using larger ones only for question generation.  
-- **Lower the `multi_hop_question_generation.num_multihops_factor`** to limit the number of multi-chunk combos.
-
----
-
-## 16. Where Can I Find Further Technical Details?
-
-- The [**Paper**](https://arxiv.org/abs/2504.01833) provides a conceptual overview, demonstration, and thorough validation results.
-- Each pipeline stage’s code is in `yourbench/pipeline/`.  
-- Utility modules (e.g., for inference concurrency, chunking, dataset management) are in `yourbench/utils/`.
-- The top-level CLI is in `yourbench/main.py`.
-
----
-
-## 17. How Can I Contribute or Raise Issues?
-
-We welcome feedback, feature requests, and bug reports! Feel free to:
-
-- Open an issue on our GitHub repository.
-- Submit a pull request if you have improvements or new features to propose.
-
----
-
-## 18. Any Ethical Considerations?
-
-YourBench can automate large-scale question generation and potentially replace some annotation tasks, which raises labor considerations. Additionally, if your LLM is biased or inaccurate, those biases can propagate into the generated benchmarks. It’s crucial to:
-
-- Evaluate the outputs with human oversight.
-- Use filtering steps (e.g., citation_score_filtering) or human review to catch low-quality or biased content.
-- Be transparent about how these synthetic benchmarks are created.
-
----
-
-## 19. What’s Next?
-
-Consider trying these advanced workflows:
-
-- **Creating Domain-Specific Benchmarks**: Provide proprietary or niche documents (e.g., medical guidelines, legal briefs) to assess your model’s real-world domain knowledge.
-- **Temporal Evaluations**: Use newly published documents (like the `Tempora-0325` set from the paper) to see if your model can handle post-training knowledge.
-- **Multi-hop Reasoning**: If your domain’s content requires integrative questions, ensure multi-hop chunk generation is enabled.
-
-Happy benchmarking, and we hope YourBench transforms how you generate and evaluate custom LLM benchmarks!
-
----
-
-*If you have other questions, please open an Issue or check the repository’s README for the most up-to-date information.*
+Custom summaries return `{"summary": "..."}`; custom rewrites return `{"question": "...", "rationale": "..."}`. See [custom schemas](CUSTOM_SCHEMAS.md) and [configuration](CONFIGURATION.md).

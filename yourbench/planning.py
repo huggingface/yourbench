@@ -84,8 +84,19 @@ def create_recipe(
     provider: str | None = None,
     base_url: str | None = None,
     api_key_env: str | None = None,
+    *,
+    max_tokens: int | None = None,
+    concurrency: int = 8,
 ) -> tuple[BenchmarkIntent, Path]:
-    """Interpret, validate and save a recipe without serializing resolved credentials."""
+    """Save a recipe with shared planner/generation limits and credential references.
+
+    ``max_tokens`` limits each model response; ``None`` uses the provider default.
+    ``concurrency`` bounds simultaneous requests per model, not total token usage.
+    """
+    if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
+        raise ValueError("max_tokens must be a positive integer")
+    if type(concurrency) is not int or concurrency < 1:
+        raise ValueError("concurrency must be a positive integer")
     if not brief.strip():
         raise ValueError("A nonempty benchmark brief is required")
     if not model_name.strip():
@@ -114,7 +125,9 @@ def create_recipe(
         raise ValueError(f"Environment variable {api_key_env} is not set")
     # HF_TOKEN is the inference client's existing default. Save its reference when used.
     key_env = api_key_env or ("HF_TOKEN" if os.environ.get("HF_TOKEN") else None)
-    model_data = {"model_name": model_name, "max_concurrent_requests": 8}
+    model_data = {"model_name": model_name, "max_concurrent_requests": concurrency}
+    if max_tokens is not None:
+        model_data["extra_parameters"] = {"max_tokens": max_tokens}
     if provider:
         model_data["provider"] = provider
     if base_url:

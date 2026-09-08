@@ -1,82 +1,76 @@
-# Using OpenAI Compatible Models
+# OpenAI-compatible model endpoints
 
-YourBench supports using any OpenAI-compatible model by configuring the `base_url` parameter in your YAML configuration.
+YourBench sends chat-completion requests through the Hugging Face inference client. To use an OpenAI-compatible server, configure its chat API base URL and the model identifier it serves. A native API with a different request protocol needs a compatible gateway or supported inference provider.
 
-## OpenRouter Example
-
-OpenRouter exposes an OpenAI-compatible API. Set `base_url` and `OPENROUTER_API_KEY`. Provider-specific options (like `reasoning`) go in `extra_parameters`.
-
-```yaml
-model_list:
-  - model_name: x-ai/grok-4-fast:free
-    base_url: "https://openrouter.ai/api/v1"
-    api_key: $OPENROUTER_API_KEY
-    max_concurrent_requests: 16
-    extra_parameters:
-      reasoning:
-        effort: medium
-```
-
-With uvx CLI:
+## Natural-language CLI
 
 ```bash
-export OPENROUTER_API_KEY=your_openrouter_key
-uvx --from yourbench yourbench run example/default_example/config.yaml \
-  --debug \
-  --model x-ai/grok-4-fast:free \
-  --base-url https://openrouter.ai/api/v1 \
-  --model-extra-parameters '{"reasoning": {"effort": "medium"}}'
+yourbench create "Generate difficult policy questions with supporting quotations" \
+  --source ./documents --output ./benchmark --model MODEL_ID \
+  --base-url http://localhost:8000/v1
 ```
 
-## Configuration
+For an authenticated server, set your key in an environment variable and add `--api-key-env YOURBENCH_API_KEY`. This flag takes the variable's name, not its value. Saved recipes keep the environment reference. An unauthenticated local server can omit it; if `HF_TOKEN` is set, the inference client may use that as its default key.
 
-Add your OpenAI-compatible model to the `model_list` section of your configuration YAML:
+## Reusable YAML
 
 ```yaml
+hf_configuration:
+  push_to_hub: false
+  local_saving: true
+  local_dataset_dir: ./datasets
+  export_jsonl: true
+  jsonl_export_dir: ./jsonl
+
 model_list:
-  - model_name: gpt-4o
-    base_url: "https://api.openai.com/v1"  # Default OpenAI API URL
-    api_key: $OPENAI_API_KEY
-    max_concurrent_requests: 10
-    extra_parameters:
-      reasoning:
-        effort: medium
+  - model_name: $YOURBENCH_MODEL
+    base_url: $YOURBENCH_BASE_URL
+    api_key: $YOURBENCH_API_KEY
+    max_concurrent_requests: 4
 
-  # Example for an Anthropic Server
-  - model_name: claude-3-7-sonnet-20250219
-    provider: null
-    base_url: "https://api.anthropic.com/v1/"  # Replace with your API endpoint
-    api_key: $ANTHROPIC_API_KEY
-    max_concurrent_requests: 5
-```
-
-## Environment Variables
-
-Set the required API keys as environment variables. For example:
-
-```bash
-export OPENAI_API_KEY=your_openai_api_key
-export ANTHROPIC_API_KEY=your_anthropic_api_key
-```
-
-If your provider exposes additional request fields (for example OpenRouter's `reasoning` settings), set them in `extra_parameters` or supply them via `--model-extra-parameters` when using the CLI.
-
-## Model Roles
-
-Assign your models to specific pipeline roles:
-
-```yaml
-model_roles:
+pipeline:
   ingestion:
-    - gpt-4o  # For vision-supported tasks
-  summarization:
-    - claude-3-7-sonnet-20250219
-  chunking:
-    - intfloat/multilingual-e5-large-instruct
-  single_hop_question_generation:
-    - gpt-4o
-  # using multiple models for question generation
-  multi_hop_question_generation:
-    - claude-3-7-sonnet-20250219
-    - gpt-4o
+    source_documents_dir: ./documents
+    output_dir: ./processed
+  summarization: {}
+  chunking: {}
+  single_hop_question_generation: {}
+  prepare_lighteval: {}
 ```
+
+Set all three referenced environment variables before loading this recipe. Use the model name and base URL supplied by your service. For a server with no authentication, omit `api_key`. File paths resolve relative to the recipe, so it can be run from another directory.
+
+```bash
+yourbench validate config.yaml
+yourbench run config.yaml
+```
+
+`run` reads model settings from YAML; it does not accept `--model`, `--base-url`, or `--model-extra-parameters` overrides. Those first two flags belong to `create`.
+
+## Request options
+
+Put endpoint-specific request options in `model_list[].extra_parameters`:
+
+```yaml
+model_list:
+  - model_name: MODEL_ID
+    base_url: http://localhost:8000/v1
+    max_concurrent_requests: 4
+    extra_parameters:
+      temperature: 0.2
+      max_tokens: 2048
+```
+
+Only use parameters supported by your endpoint and model. YourBench does not translate arbitrary provider protocols. A provider rejection stops the run; it is not treated as an empty successful response.
+
+When using Hugging Face routing instead of a direct compatible URL, set `provider` and the appropriate key. Hub dataset publication is a separate setting and is not required for inference.
+
+## Diagnose integration issues
+
+- Authentication errors: verify the referenced variable is set and the key belongs to that endpoint.
+- Missing model errors: use the served model identifier, including any gateway alias.
+- Unsupported request options: remove or correct `extra_parameters` according to the endpoint contract.
+- Context-limit errors: reduce summary or chunk sizes, keeping room for prompt and output tokens.
+- Invalid JSON: check the model response contract and custom prompts. YourBench does not search malformed prose for salvageable JSON.
+
+Retries cover transient failures such as timeouts, rate limits and server errors. Permanent request errors fail immediately. A failed call cancels sibling work in its batch and closes shared clients. See [CLI usage](CLI.md) for run artifacts and [configuration](CONFIGURATION.md) for model roles.

@@ -1,27 +1,23 @@
-# Custom Schema Demo
-# This example shows how to use custom Pydantic schemas to control question output format.
-
 hf_configuration:
-  hf_dataset_name: yourbench-custom-schema-demo
+  hf_dataset_name: custom-schema-demo
+  push_to_hub: false
+  upload_card: false
   private: true
-
+  local_saving: true
+  local_dataset_dir: ./output/datasets
+  export_jsonl: true
+  jsonl_export_dir: ./output/jsonl
 model_list:
-  - model_name: $OPENAI_MODEL
-    base_url: $OPENAI_BASE_URL
-    api_key: $OPENAI_API_KEY
-    max_concurrent_requests: 64
-
+- model_name: $YOURBENCH_MODEL
+  base_url: $YOURBENCH_BASE_URL
+  api_key: $YOURBENCH_API_KEY
+  max_concurrent_requests: 4
 pipeline:
   ingestion:
-    source_documents_dir: ./data
-    output_dir: ./processed
-  
-  summarization:
-  
-  chunking:
-  
-  # Use the technical Q&A schema for single-hop questions
+    source_documents_dir: ../sample_documents
+    output_dir: ./output/processed
+  summarization: null
+  chunking: null
   single_hop_question_generation:
     question_schema: ./schemas/technical_qa.py
-  
-  prepare_lighteval:
+  prepare_lighteval: {}

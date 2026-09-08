@@ -1,22 +1,31 @@
 hf_configuration:
-  hf_dataset_name: mckinsey_state_of_ai_doc_understanding
-  hf_organization: $HF_ORGANIZATION
-  private: false
-
+  hf_dataset_name: rich-pdf-extraction-with-gemini
+  push_to_hub: false
+  upload_card: false
+  private: true
+  local_saving: true
+  local_dataset_dir: ./output/datasets
+  export_jsonl: true
+  jsonl_export_dir: ./output/jsonl
 model_list:
-  - model_name: google/gemini-2.5-flash
-    base_url: https://openrouter.ai/api/v1
-    api_key: $OPENROUTER_API_KEY
-
+- model_name: $YOURBENCH_MODEL
+  base_url: $YOURBENCH_BASE_URL
+  api_key: $YOURBENCH_API_KEY
+  max_concurrent_requests: 4
 pipeline:
   ingestion:
     llm_ingestion: true
-    source_documents_dir: ./data
-    output_dir: ./processed
-  summarization:
+    source_documents_dir: ../sample_pdf
+    output_dir: ./output/processed
+    supported_file_extensions:
+    - .pdf
+  summarization: null
   chunking:
-  single_hop_question_generation:
-  multi_hop_question_generation:
-  cross_document_question_generation:
-  prepare_lighteval:
-  citation_score_filtering:
+    l_max_tokens: 96
+    token_overlap: 16
+    h_min: 2
+    h_max: 3
+  single_hop_question_generation: null
+  multi_hop_question_generation: null
+  prepare_lighteval: {}
+  citation_score_filtering: null

@@ -230,3 +230,44 @@ def test_invalid_planner_data_is_not_echoed(source, tmp_path, planner):
     assert result.exit_code == 1
     assert "invalid benchmark intent" in result.output
     assert "sensitive-provider-response" not in result.output
+
+
+@pytest.mark.parametrize("option", ["max_tokens", "concurrency"])
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "8"])
+def test_invalid_model_limits_fail_before_planning_or_writing(source, tmp_path, planner, option, value):
+    output = tmp_path / "benchmark"
+    with pytest.raises(ValueError, match=f"{option} must be a positive integer"):
+        planning.create_recipe("Evaluate policies", source, output, "test-model", **{option: value})
+    planner.assert_not_called()
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("limits", [{}, {"max_tokens": 1, "concurrency": 1}, {"max_tokens": 2048, "concurrency": 3}])
+def test_model_limits_apply_to_planner_and_reusable_recipe(source, tmp_path, planner, monkeypatch, limits):
+    monkeypatch.setenv("TEST_PLANNER_KEY", "first-private-value")
+    output = tmp_path / "benchmark"
+    _, config_path = planning.create_recipe(
+        "Evaluate policies",
+        source,
+        output,
+        "test-model",
+        None,
+        "http://localhost:8000/v1",
+        "TEST_PLANNER_KEY",
+        **limits,
+    )
+    runtime_model = planner.call_args.args[0].model_list[0]
+    expected_parameters = {"max_tokens": limits["max_tokens"]} if "max_tokens" in limits else {}
+    assert runtime_model.max_concurrent_requests == limits.get("concurrency", 8)
+    assert runtime_model.extra_parameters == expected_parameters
+    assert runtime_model.api_key == "first-private-value"
+    saved_model = yaml.safe_load(config_path.read_text())["model_list"][0]
+    assert saved_model["max_concurrent_requests"] == runtime_model.max_concurrent_requests
+    assert saved_model.get("extra_parameters", {}) == expected_parameters
+    assert saved_model["api_key"] == "${TEST_PLANNER_KEY}"
+    assert "first-private-value" not in "".join(path.read_text() for path in output.iterdir())
+    monkeypatch.setenv("TEST_PLANNER_KEY", "rotated-private-value")
+    reloaded_model = load_config(config_path).model_list[0]
+    assert reloaded_model.api_key == "rotated-private-value"
+    assert reloaded_model.max_concurrent_requests == runtime_model.max_concurrent_requests
+    assert reloaded_model.extra_parameters == expected_parameters

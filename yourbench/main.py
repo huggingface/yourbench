@@ -6,6 +6,7 @@ A modern CLI using Rich for beautiful output, progress tracking, and useful comm
 
 import os
 import sys
+import json
 import atexit
 from pathlib import Path
 from datetime import datetime
@@ -151,6 +152,10 @@ def create(
     provider: str | None = typer.Option(None, "--provider", help="Inference provider"),
     base_url: str | None = typer.Option(None, "--base-url", help="Compatible inference endpoint"),
     api_key_env: str | None = typer.Option(None, "--api-key-env", help="Name of the API key environment variable"),
+    max_tokens: int | None = typer.Option(
+        None, "--max-tokens", min=1, help="Provider output-token limit per response, including planning"
+    ),
+    concurrency: int = typer.Option(8, "--concurrency", min=1, help="Maximum simultaneous requests per model"),
     plan_only: bool = typer.Option(
         False, "--plan-only", help="Make one planning call and save a recipe without generation"
     ),
@@ -161,7 +166,17 @@ def create(
     from yourbench.pipeline.handler import run_pipeline_with_progress
 
     try:
-        intent, config_path = create_recipe(brief, source, output, model, provider, base_url, api_key_env)
+        intent, config_path = create_recipe(
+            brief,
+            source,
+            output,
+            model,
+            provider,
+            base_url,
+            api_key_env,
+            max_tokens=max_tokens,
+            concurrency=concurrency,
+        )
         console.print(f"Saved recipe: {config_path}", markup=False)
         for assumption in intent.assumptions:
             console.print(f"Assumption: {assumption}", markup=False)
@@ -179,7 +194,7 @@ def create(
 
 @app.command()
 def run(
-    config_path: str = typer.Argument(..., help="Path to YAML config file"),
+    config_path: str = typer.Argument(..., help="YAML recipe or generated output directory"),
     debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug logging"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Minimal output (only errors)"),
     no_banner: bool = typer.Option(False, "--no-banner", help="Hide the banner"),
@@ -190,7 +205,9 @@ def run(
     if not quiet and not no_banner:
         _print_banner()
 
-    config_file = Path(config_path)
+    from yourbench.api import _recipe_path
+
+    config_file = _recipe_path(config_path)
     if not config_file.exists():
         console.print(f"[bold red]\u2717[/bold red] Config file not found: {config_path}")
         raise typer.Exit(1)
@@ -199,7 +216,7 @@ def run(
         console.print(f"[bold red]\u2717[/bold red] Config must be a YAML file (.yaml or .yml): {config_path}")
         raise typer.Exit(1)
 
-    from yourbench.conf.loader import load_config, get_enabled_stages
+    from yourbench.conf.loader import load_config
     from yourbench.pipeline.handler import run_pipeline_with_progress
 
     try:
@@ -210,11 +227,6 @@ def run(
 
         if not quiet:
             _print_config_summary(config)
-
-        stages = get_enabled_stages(config)
-        if not stages:
-            console.print("[yellow]\u26a0[/yellow] No pipeline stages enabled")
-            raise typer.Exit(0)
 
         run_pipeline_with_progress(config, debug=debug, quiet=quiet, console=console)
 
@@ -228,6 +240,35 @@ def run(
         logger.exception(f"Pipeline failed: {e}")
         console.print(f"[bold red]\u2717[/bold red] Pipeline failed: {e}")
         raise typer.Exit(1)
+
+
+@app.command("inspect")
+def inspect_result(
+    path: Path = typer.Argument(..., help="Output directory or YAML recipe"),
+    as_json: bool = typer.Option(False, "--json", help="Emit a machine-readable summary"),
+) -> None:
+    """Read local run status and dataset sizes without model calls or credentials."""
+    from yourbench import load_result
+
+    try:
+        summary = load_result(path).summary()
+    except Exception as error:
+        console.print(f"Cannot inspect local result ({type(error).__name__})", markup=False)
+        raise typer.Exit(1) from None
+    if as_json:
+        # Avoid Rich wrapping JSON strings or applying terminal markup.
+        typer.echo(json.dumps(summary, indent=2))
+        return
+    console.print(f"Status: {summary['status']}", markup=False)
+    console.print(f"Recipe: {summary['config_path']}", markup=False)
+    table = Table("Subset", "Rows")
+    for name, details in summary["subsets"].items():
+        table.add_row(name, str(details["rows"]))
+    console.print(table)
+    if not summary["subsets"]:
+        console.print("No local datasets found.")
+    if summary["status"] != "completed":
+        console.print("Stored artifacts may be partial or left over from an earlier run.")
 
 
 @app.command()

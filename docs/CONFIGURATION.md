@@ -1,6 +1,6 @@
 # YourBench Configuration Guide
 
-YourBench uses YAML configuration files to define your pipeline settings. This guide covers how to configure each component.
+YourBench uses YAML configuration files to define your pipeline settings. This guide covers saved recipes and advanced stage settings. For a smaller Python interface, see the [Python API guide](./PYTHON_API.md).
 
 ## Table of Contents
 
@@ -41,6 +41,7 @@ A basic config file looks like this:
 ```yaml
 hf_configuration:
   hf_dataset_name: my-dataset-name
+  push_to_hub: false
 
 model_list:
   - model_name: zai-org/GLM-4.5
@@ -62,21 +63,23 @@ Key points:
 
 ## Minimal Example
 
-Smallest working config (ingestion → chunking → single-shot → LightEval). Requires env vars in `.env` (`OPENAI_API_KEY`; optionally `OPENAI_BASE_URL`, `HF_TOKEN`, `HF_ORGANIZATION`).
+A local pipeline that deliberately skips summarization (ingestion → chunking → single-hop → LightEval). Set `OPENAI_MODEL` and `OPENAI_API_KEY`; the CLI also reads `.env`. The source directory is relative to the YAML file.
 
 ```yaml
 hf_configuration:
   hf_dataset_name: my-dataset
+  push_to_hub: false
 
 model_list:
-  - model_name: ${OPENAI_MODEL:-gpt-4o-mini}
+  - model_name: $OPENAI_MODEL
     api_key: $OPENAI_API_KEY
-    base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+    base_url: https://api.openai.com/v1
 
 pipeline:
   ingestion:
-    source_documents_dir: example/default_example/data
+    source_documents_dir: documents
   chunking:
+    input_subset: ingested
   single_hop_question_generation:
   prepare_lighteval:
 ```
@@ -95,7 +98,8 @@ Controls dataset naming, organization, and upload behavior.
 
 ```yaml
 hf_configuration:
-  hf_dataset_name: my-dataset-name  # Required: dataset name on Hub
+  hf_dataset_name: my-dataset-name  # Dataset name, including for local runs
+  push_to_hub: false                # Default: true; false disables Hub reads/writes
   hf_organization: $HF_ORGANIZATION  # Optional: organization name
   hf_token: $HF_TOKEN               # Optional: HF API token (or set env var)
   private: false                    # Default: false - dataset visibility
@@ -118,12 +122,17 @@ model_list:
     api_key: $HF_TOKEN             # Optional: API key (defaults to HF_TOKEN)
     max_concurrent_requests: 128    # Default: 128 - parallel request limit
     encoding_name: cl100k_base     # Default: tokenizer for counting
-    provider: null                 # Optional: openai, anthropic, etc.
+    provider: null                 # Optional: Hugging Face inference provider identifier
     bill_to: null                  # Optional: billing project
-    extra_parameters: {}           # Optional: provider-specific params
+    extra_parameters:              # Optional: provider-supported generation params
+      max_tokens: 2048              # Maximum output tokens per response
 ```
 
-Multiple models can be defined and assigned to different pipeline stages.
+Multiple models can be defined and assigned to different pipeline stages. Summarization and rewriting each require exactly one assigned model. Endpoint compatibility and accepted extra parameters depend on the provider.
+
+`yourbench create --max-tokens 2048 --concurrency 3 ...` writes these values as `extra_parameters.max_tokens` and `max_concurrent_requests` and applies them to the planning call too. Both values must be positive integers. Creation defaults to concurrency 8 and leaves the output-token limit to the provider when omitted; a raw YAML model defaults to concurrency 128. Output-token limits are per response, not total token or dollar budgets; too small a limit can truncate JSON and fail a stage.
+
+`pipeline.summarization.max_tokens` is different: it controls the input chunk size used to split documents.
 
 ### Pipeline Configuration
 
@@ -181,6 +190,7 @@ Splits documents into chunks for question generation.
 ```yaml
 pipeline:
   chunking:
+    input_subset: summarized  # Use ingested to deliberately skip summarization
     l_max_tokens: 8192     # Max tokens per chunk
     token_overlap: 512     # Overlap between chunks
     encoding_name: cl100k_base
@@ -193,7 +203,7 @@ pipeline:
 
 Generate questions from document chunks. Three types are available:
 
-#### Single-Shot Questions
+#### Single-Hop Questions
 
 ```yaml
 pipeline:
@@ -206,7 +216,7 @@ pipeline:
     chunk_sampling:
       enable: false
       num_samples: 100
-      strategy: random              # or uniform
+      strategy: random              # or first
       random_seed: 42
 ```
 
@@ -273,7 +283,7 @@ pipeline:
 
 ### Environment Variables
 
-Use `$VAR_NAME` or `${VAR_NAME}` syntax to reference environment variables:
+Use `$VAR_NAME` or `${VAR_NAME}` syntax to reference environment variables. Shell default expressions such as `${VAR:-fallback}` are not supported. Set a value in the environment or write a literal default in YAML. Prompt text and additional instructions remain literal:
 
 ```yaml
 hf_configuration:
@@ -298,9 +308,7 @@ pipeline:
     summarization_user_prompt: prompts/summary.md
 ```
 
-Prompts are loaded from:
-1. The specified file path (if exists)
-2. Package defaults (built-in prompts)
+Omitting a prompt uses its package default. Use `file:prompts/custom.md` for an explicit file or `inline:your instructions` for literal text. Relative paths resolve beside the YAML recipe. Missing requested files raise an error; they do not silently use the default. Custom prompts must retain the required format placeholders and response contract (see the interface changes below).
 
 ### Custom Question Schemas
 
@@ -342,21 +350,21 @@ Assign specific models to pipeline stages:
 
 ```yaml
 model_list:
-  - model_name: gpt-4
-    base_url: https://api.openai.com/v1
-    api_key: $OPENAI_API_KEY
-  - model_name: claude-3-opus
-    base_url: https://api.anthropic.com/v1
-    api_key: $ANTHROPIC_API_KEY
+  - model_name: summary-model
+    base_url: $SUMMARY_BASE_URL
+    api_key: $SUMMARY_API_KEY
+  - model_name: question-model
+    base_url: $QUESTION_BASE_URL
+    api_key: $QUESTION_API_KEY
 
 model_roles:
-  ingestion: [gpt-4]
-  summarization: [gpt-4]
-  single_hop_question_generation: [claude-3-opus]
-  multi_hop_question_generation: [claude-3-opus]
+  ingestion: [summary-model]
+  summarization: [summary-model]
+  single_hop_question_generation: [question-model]
+  multi_hop_question_generation: [question-model]
 ```
 
-If `model_roles` is not specified, all stages use the first model in `model_list`.
+Use model identifiers served by your configured endpoints; the example names above are placeholders for two compatible inference endpoints. If `model_roles` is not specified, all stages use the first model in `model_list`.
 
 ## Configuration Examples
 
@@ -365,6 +373,7 @@ If `model_roles` is not specified, all stages use the first model in `model_list
 ```yaml
 hf_configuration:
   hf_dataset_name: my-benchmark
+  push_to_hub: false
 
 model_list:
   - model_name: zai-org/GLM-4.5
@@ -383,6 +392,7 @@ pipeline:
 ```yaml
 hf_configuration:
   hf_dataset_name: comprehensive-benchmark
+  push_to_hub: false
   hf_organization: $HF_ORGANIZATION
   private: true
   local_saving: true
@@ -434,6 +444,7 @@ debug: false
 ```yaml
 hf_configuration:
   hf_dataset_name: technical-benchmark
+  push_to_hub: false
 
 model_list:
   - model_name: gpt-4-turbo
@@ -444,6 +455,7 @@ pipeline:
   ingestion:
     source_documents_dir: data/raw
   chunking:
+    input_subset: ingested
   single_hop_question_generation:
     question_schema: ./schemas/technical.py
     additional_instructions: "Focus on implementation details"
@@ -455,6 +467,7 @@ pipeline:
 ```yaml
 hf_configuration:
   hf_dataset_name: custom-provider-test
+  push_to_hub: false
 
 model_list:
   - model_name: my-local-model
@@ -494,3 +507,5 @@ The redundant `pipeline.ingestion.upload_to_hub` option was removed. Use `hf_con
 Local dataset writes serialize into a sibling staging directory and restore the previous dataset if promotion fails. Corrupt existing stores are errors, never treated as empty stores or missing subsets. JSONL files are replaced only after successful serialization. This protects individual writes; an entire pipeline run is not one transaction, and concurrent writers to the same output directory are not supported. Remote append requires an existing readable target; use `concat_if_exist: false` for initial publication.
 
 Inference events are recorded as JSONL in `logs/inference.jsonl`; the duplicate CSV reporting path was removed. Events include success/failure, timing, and token counts without prompt or credential contents.
+
+`run.json` describes the last recorded pipeline execution. Errors while loading a recipe happen before a new execution is recorded and may leave the previous status unchanged; always check the exception or CLI exit code for the current attempt.

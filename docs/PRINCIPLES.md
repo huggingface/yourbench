@@ -30,3 +30,9 @@ A central stage catalogue supplies execution order, module routing, display labe
 The natural-language frontend defaults to local datasets and JSONL. Existing YAML can explicitly enable Hugging Face Hub publication. In local-only mode, missing data never silently triggers a remote read.
 
 This is a benchmark generation tool, not a guarantee that every generated question is useful or correct. Exact question counts, dollar spending caps, interactive conversations, and executable evaluators are not implemented. The planner is instructed to surface these unsupported requests. Failed reruns may leave previous artifacts on disk; use `run.json` to identify the most recent run's outcome.
+
+## Library and inspection
+
+The public Python functions `create`, `run`, and `load_result` return a `BenchmarkResult` that exposes local datasets and run metadata. `yourbench inspect OUTPUT --json` reads the same metadata without credentials or inference. The status is the last recorded pipeline execution; configuration-loading errors can leave an older status unchanged. See the [Python API](PYTHON_API.md).
+
+Per-response token limits and per-model concurrency can be specified at creation and are carried into the saved recipe. Generation requests include stage-specific evidence instructions: single-hop questions must be answerable from their one chunk, while combined reasoning uses only the supplied multi-hop passages. These instructions guide the model; they are not semantic validation.

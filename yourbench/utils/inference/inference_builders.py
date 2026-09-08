@@ -7,6 +7,24 @@ from yourbench.utils.chunking_utils import sample_single_hop_chunks
 from yourbench.utils.inference.inference_core import InferenceCall
 
 
+_SINGLE_HOP_EVIDENCE = """Stage evidence contract: single-hop
+Treat the benchmark brief as a topic preference, not a requirement to cover every topic in every request.
+Every question and its complete answer must be supported entirely by the supplied text chunk.
+The title and document summary provide orientation only; they are not answer or citation evidence.
+Do not ask about facts from other chunks or documents, even when the brief requests comparisons.
+Reserve combining sources for multi-hop or cross-document requests. Cite only this chunk.
+Omit unsupported topics instead of creating questions answered with 'not specified' or abstention.
+If no useful question is supported by this chunk, return the empty JSON array []."""
+
+_MULTI_HOP_EVIDENCE = """Stage evidence contract: multi-hop
+Treat the benchmark brief as a topic preference, not a requirement to cover every topic in every request.
+Every question and its complete answer must be supported entirely by the supplied source chunks.
+The title and document summary provide orientation only; they are not answer or citation evidence.
+Combine evidence from at least two supplied chunks, and cite only those chunks.
+Omit unsupported topics instead of creating questions answered with 'not specified' or abstention.
+If no useful synthesis is supported by these chunks, return the empty JSON array []."""
+
+
 class SourceIndex(NamedTuple):
     row_index: int
     document_id: str
@@ -14,6 +32,7 @@ class SourceIndex(NamedTuple):
 
 
 def build_single_hop_inference_calls(dataset, system_msg, stage_cfg, sampling_cfg):
+    system_msg = {**system_msg, "content": f"{system_msg['content']}\n\n{_SINGLE_HOP_EVIDENCE}"}
     calls, indices = [], []
     for index, row in enumerate(dataset):
         for chunk in sample_single_hop_chunks(row["chunks"], sampling_cfg):
@@ -33,6 +52,7 @@ def build_single_hop_inference_calls(dataset, system_msg, stage_cfg, sampling_cf
 
 
 def build_multi_hop_inference_calls(dataset, system_msg, stage_cfg):
+    system_msg = {**system_msg, "content": f"{system_msg['content']}\n\n{_MULTI_HOP_EVIDENCE}"}
     calls, indices = [], []
     for index, row in enumerate(dataset):
         for group in row["multihop_chunks"]:

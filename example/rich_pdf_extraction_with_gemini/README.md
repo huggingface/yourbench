@@ -1,16 +1,11 @@
-# Rich PDF Extraction with Gemini
+# PDF page-image ingestion
 
-This example is to demonstrate how you can perform LLM ingestion of a PDF, on a per page basis. This preserves rich charts, figures, diagrams, latex, etc, while doing the question generation process.
-
-In this example, we use `gemini-2.5-flash` through [OpenRouter](https://openrouter.ai/) to process and generate questions.
-
-## How to run?
+This directory retains its historical Gemini example name. Set the endpoint variables from [the examples guide](../README.md) to any accessible model that supports images in chat requests.
 
 ```bash
-# set an OPENROUTER_API_KEY
-export OPENROUTER_API_KEY=
-# run the script
 yourbench run example/rich_pdf_extraction_with_gemini/config.yaml
 ```
 
-The expected result from this run can be found at the following huggingface dataset: [yourbench/mckinsey_state_of_ai_doc_understanding](https://huggingface.co/datasets/yourbench/mckinsey_state_of_ai_doc_understanding)
+The recipe renders the included small PDF page as an image and asks the model to transcribe it before summarization and question generation. `llm_ingestion: true` applies to PDFs only; exactly one model must be assigned to ingestion. Page-rendering and model errors stop the stage rather than silently switching extraction methods.
+
+Replace `source_documents_dir` with your own PDFs to try tables, figures or equations. Vision extraction can still omit or misread details: compare the generated `output/processed/` text with the source PDF. The checked-in fixture is intentionally plain text and does not establish chart-extraction quality. Results are saved locally under `output/`.

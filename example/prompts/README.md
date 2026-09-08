@@ -1,31 +1,19 @@
-# Shared Prompt Templates
+# Shared prompt templates
 
-This directory contains reusable prompt templates for question generation.
+| File | Purpose |
+| --- | --- |
+| [single_shot_technical.md](single_shot_technical.md) | Technical documentation questions |
+| [single_shot_business.md](single_shot_business.md) | Business decision questions |
+| [multi_hop_business.md](multi_hop_business.md) | Questions joining several business passages |
 
-## Available Templates
-
-| Template | Use Case | Description |
-|----------|----------|-------------|
-| `single_hop_default.md` | General | Balanced prompt for most document types |
-| `single_hop_technical.md` | Technical docs | API docs, tutorials, specifications |
-| `single_hop_business.md` | Business reports | Strategy reports, market analysis |
-| `multi_hop_default.md` | General | Multi-hop reasoning across chunks |
-
-## Usage
-
-Reference these in your config:
+Paths are relative to the YAML file. For a recipe inside `example/default_example/`:
 
 ```yaml
 pipeline:
   single_hop_question_generation:
-    single_hop_system_prompt: example/prompts/single_hop_technical.md
+    single_hop_system_prompt: ../prompts/single_shot_technical.md
   multi_hop_question_generation:
-    multi_hop_system_prompt: example/prompts/multi_hop_default.md
+    multi_hop_system_prompt: ../prompts/multi_hop_business.md
 ```
 
-## Customization
-
-Copy a template and modify the:
-- **Role description** - Who the question generator is
-- **Core objectives** - What makes a good question for your domain
-- **Quality standards** - Domain-specific quality criteria
+These are system prompts for question generation. Keep the output to a single JSON array matching the appended schema and quote only supplied sources. Use `additional_instructions` when a short instruction is enough.

@@ -1,26 +1,35 @@
-# This is an example configuration for running the pipeline on a local VLLM server.
-# It uses the Magistral-Small-2506 model from Mistral AI.
 hf_configuration:
-  hf_dataset_name: reachy_mini_info_benchmark
-  hf_organization: $HF_ORGANIZATION
-  private: false
-
+  hf_dataset_name: local-vllm-private-data
+  push_to_hub: false
+  upload_card: false
+  private: true
+  local_saving: true
+  local_dataset_dir: ./output/datasets
+  export_jsonl: true
+  jsonl_export_dir: ./output/jsonl
 model_list:
-  - model_name: mistralai/Magistral-Small-2506
-    base_url: http://localhost:8000/v1
-    api_key: NO-API-KEY-NEEDED
-
+- model_name: $YOURBENCH_MODEL
+  base_url: http://localhost:8000/v1
+  max_concurrent_requests: 4
 pipeline:
   ingestion:
-    source_documents_dir: ./data
-    output_dir: ./processed
-  summarization:
+    source_documents_dir: ../sample_documents
+    output_dir: ./output/processed
+  summarization: null
   chunking:
+    l_max_tokens: 96
+    token_overlap: 16
+    h_min: 2
+    h_max: 3
   single_hop_question_generation:
-    additional_instructions: "Ask generalizable questions."
+    additional_instructions: Ask generalizable questions.
   multi_hop_question_generation:
-    additional_instructions: "Ask generalizable questions."
+    additional_instructions: Ask generalizable questions.
   cross_document_question_generation:
-    additional_instructions: "Ask generalizable questions."
-  prepare_lighteval:
-  citation_score_filtering:
+    additional_instructions: Ask generalizable questions.
+    max_combinations: 2
+    num_docs_per_combination:
+    - 2
+    - 2
+  prepare_lighteval: {}
+  citation_score_filtering: null

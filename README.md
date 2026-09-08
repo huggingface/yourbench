@@ -25,7 +25,7 @@
 
 ---
 
-Generate high-quality QA pairs and evaluation datasets from any source documents. YourBench transforms your PDFs, Word docs, and text files into structured benchmark datasets with configurable output formats. Appearing at COLM 2025. **100% free and open source.**
+Generate QA pairs and evaluation datasets from source documents. YourBench transforms PDFs, Word documents, and text into structured benchmark datasets with configurable output formats. The library is open source; hosted model calls may incur provider charges.
 
 ## Features
 
@@ -34,7 +34,7 @@ Generate high-quality QA pairs and evaluation datasets from any source documents
 - **Custom Output Schemas** – Define your own Pydantic models for question/answer format
 - **Multi-Model Support** – Use different LLMs for different pipeline stages
 - **HuggingFace Integration** – Push datasets directly to the Hub or save locally
-- **Quality Filtering** – Citation scoring and deduplication built-in
+- **Reviewable Outputs** – Source references, citation scores, and exact normalized-question deduplication
 
 ## Quick Start
 
@@ -59,12 +59,33 @@ Set `MODEL_API_KEY` in your environment, or omit `--api-key-env` for an unauthen
 YourBench interprets the brief, saves `plan.json` and `config.yaml`, then generates local datasets and JSONL under the output directory. Add `--plan-only` to inspect the interpretation first (this still makes a model call). Rerun a saved recipe with:
 
 ```bash
-yourbench run ./benchmark/config.yaml
+yourbench run ./benchmark
+yourbench inspect ./benchmark
 ```
 
 The brief can specify domain, audience, language, difficulty, and question style. Exact counts, dollar budgets, conversational tasks, and executable evaluators are currently unsupported and should be reported by the planner. Generated answers still require evaluation of their quality; schema validation checks structure, not factual correctness.
 
-The new frontend defaults to local output. YAML configurations remain supported for explicit stage/model settings. See [CLI reference](docs/CLI.md), [configuration changes](docs/CONFIGURATION.md#configuration-changes-in-the-natural-language-redesign), and [schema/export contracts](docs/CUSTOM_SCHEMAS.md#validation-and-export-contracts).
+Use `--max-tokens 4000 --concurrency 2` to bound each response and simultaneous requests, including planning. These are not total cost or question-count limits.
+
+The natural-language frontend defaults to local output. YAML configurations remain supported for explicit stage/model settings. See [CLI reference](docs/CLI.md), [configuration changes](docs/CONFIGURATION.md#configuration-changes-in-the-natural-language-redesign), and [schema/export contracts](docs/CUSTOM_SCHEMAS.md#validation-and-export-contracts).
+
+## Use from Python
+
+```python
+from yourbench import create, load_result
+
+result = create(
+    "Test understanding of policy exceptions",
+    source="./documents", output="./benchmark", model="MODEL_ID",
+    base_url="http://localhost:8000/v1", max_tokens=4000, concurrency=2,
+)
+questions = result.load_dataset()
+
+# Later, without model credentials or another inference call:
+print(load_result("./benchmark").summary())
+```
+
+For an authenticated endpoint, set the key in the environment and pass `api_key_env="MODEL_API_KEY"`. See the [Python API guide](docs/PYTHON_API.md) for planning, rerunning, reading subsets, and notebook usage.
 
 ## Installation
 
@@ -93,9 +114,13 @@ pip install -e .
 ```yaml
 hf_configuration:
   hf_dataset_name: my-benchmark
+  push_to_hub: false
+  upload_card: false
+  export_jsonl: true
 
 model_list:
-  - model_name: openai/gpt-4o-mini
+  - model_name: MODEL_ID
+    base_url: https://api.openai.com/v1
     api_key: $OPENAI_API_KEY
 
 pipeline:
@@ -136,7 +161,8 @@ YourBench provides several CLI commands:
 | Command | Description |
 |---------|-------------|
 | `yourbench create "brief" --source DIR --model MODEL --output DIR` | Interpret an objective and generate a local benchmark |
-| `yourbench run <config>` | Run the full pipeline |
+| `yourbench run <config-or-output>` | Run enabled stages from a saved recipe |
+| `yourbench inspect <config-or-output> [--json]` | Read local status and subset sizes without inference |
 | `yourbench validate <config>` | Check config without running |
 | `yourbench estimate <config>` | Estimate token usage |
 | `yourbench init` | Generate a local starter config |
@@ -149,6 +175,7 @@ See [CLI Reference](./docs/CLI.md) for full documentation.
 
 | Guide | Description |
 |-------|-------------|
+| [Python API](./docs/PYTHON_API.md) | Create, run, and read local results from Python |
 | [Configuration](./docs/CONFIGURATION.md) | Full config reference with all options |
 | [Custom Schemas](./docs/CUSTOM_SCHEMAS.md) | Define your own output formats |
 | [How It Works](./docs/PRINCIPLES.md) | Pipeline architecture and stages |
@@ -170,16 +197,23 @@ No installation needed:
 The `example/` folder contains ready-to-use configurations:
 
 - `default_example/` – Basic setup with sample documents
-- `harry_potter_quizz/` – Generate quiz questions from books
+- `harry_potter_quizz/` – Multiple-choice quiz with a replaceable sample corpus
 - `custom_prompts_demo/` – Custom prompts for domain-specific questions
 - `local_vllm_private_data/` – Use local models for private data
-- `rich_pdf_extraction_with_gemini/` – LLM-based PDF extraction for charts/figures
+- `rich_pdf_extraction_with_gemini/` – PDF extraction using a compatible vision model
 
-Run any example:
+Set the endpoint variables used by the examples (the sample documents are included):
 
 ```bash
+export YOURBENCH_MODEL=MODEL_ID
+export YOURBENCH_BASE_URL=http://localhost:8000/v1
+# For an authenticated endpoint, set YOURBENCH_API_KEY in your environment.
+# For an unauthenticated local endpoint, use a nonempty placeholder:
+export YOURBENCH_API_KEY=not-needed
 yourbench run example/default_example/config.yaml
 ```
+
+See the [examples guide](example/README.md) for the six recipes and their required model capabilities.
 
 ## API Keys
 
