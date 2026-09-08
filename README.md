@@ -36,6 +36,8 @@ Generate QA pairs and evaluation datasets from source documents. YourBench trans
 - **HuggingFace Integration** – Push datasets directly to the Hub or save locally
 - **Reviewable Outputs** – Source references, citation scores, and exact normalized-question deduplication
 
+See the [redesign and migration guide](docs/MIGRATION.md) for new interfaces, breaking changes, and verification.
+
 ## Quick Start
 
 Describe the evaluation you want and point YourBench at your documents:
